@@ -12,7 +12,9 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -32,6 +34,7 @@ SQLITE_EXTENSION_INIT1
 
 #define DBMEM_TYPE_VALUE                        500
 #define DBMEM_LOCAL_PROVIDER                    "local"
+#define DBMEM_SAVEPOINT_NAME                    "memory_transaction"
 
 #define DBMEM_SETTINGS_KEY_PROVIDER             "provider"
 #define DBMEM_SETTINGS_KEY_MODEL                "model"
@@ -41,6 +44,8 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_SAVE_CONTEXT         "save_content"
 #define DBMEM_SETTINGS_KEY_SKIP_SEMANTIC        "skip_semantic"
 #define DBMEM_SETTINGS_KEY_SKIP_HTML            "skip_html"
+#define DBMEM_SETTINGS_KEY_EXTENSIONS           "extensions"
+#define DBMEM_SETTINGS_KEY_ENGINE_WARMUP        "engine_warmup"
 
 // default values from https://docs.openclaw.ai/concepts/memory
 #define DEFAULT_CHARS_PER_TOKEN                 4       // Approximate number of characters per token (GPT ≈ 4, Claude ≈ 3.5)
@@ -49,37 +54,41 @@ SQLITE_EXTENSION_INIT1
 #define DEFAULT_MAX_SNIPPET_CHARS               700
 
 typedef struct {
-    sqlite3     *db;
-    char        *provider;
-    char        *model;
-    char        *api_key;
-    size_t      max_tokens;
-    size_t      overlay_tokens;
-    size_t      chars_per_tokens;
-    size_t      snippet_max_chars;
-    bool        save_content;
-    bool        skip_semantic;
-    bool        skip_html;
-    char        error_msg[DBMEM_MAXERROR_SIZE];
+    // Database and engine
+    sqlite3                 *db;                // SQLite database connection
+    dbmem_local_engine_t    *engine;            // Local embedding engine (llama.cpp based)
+
+    // Provider configuration
+    char        *provider;                      // Embedding provider: "local" or remote service name
+    char        *model;                         // Model path (local) or model identifier (remote)
+    char        *api_key;                       // API key for remote embedding services
+    char        *extensions;                    // Comma-separated file extensions to process (e.g., "md,txt")
+
+    // Chunking parameters
+    size_t      max_tokens;                     // Maximum tokens per chunk
+    size_t      overlay_tokens;                 // Token overlap between consecutive chunks
+    size_t      chars_per_tokens;               // Estimated characters per token (for size calculations)
+    size_t      snippet_max_chars;              // Maximum characters for search result snippets
+
+    // Processing flags
+    bool        engine_warmup;                  // Whether engine has been warmed up (GPU shaders compiled)
+    bool        save_content;                   // Whether to store original content in database
+    bool        skip_semantic;                  // Skip markdown parsing, treat as raw text
+    bool        skip_html;                      // Strip HTML tags when parsing markdown
+
+    // Runtime state
+    int64_t     counter;                        // Chunk counter during file processing
+    uint64_t    hash;                           // Hash of the current text
+    const char  *context;                       // Optional context string for current operation
+    const char  *path;                          // Full path file (optional)
+    char        error_msg[DBMEM_ERRBUF_SIZE];   // Error message buffer
 } dbmem_context;
+
+static bool fts5_is_available = true;
 
 // MARK: - Settings -
 
-int dbmem_database_init (sqlite3 *db) {
-    const char *sql = "CREATE TABLE IF NOT EXISTS dbmem_settings (key TEXT PRIMARY KEY, value TEXT);";
-    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash BLOB PRIMARY KEY NOT NULL, path TEXT NOT NULL UNIQUE, value TEXT DEFAULT NULL, context TEXT DEFAULT NULL);";
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash BLOB NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    return rc;
-}
-
-int dbmem_settings_write (sqlite3 *db, const char *key, const char *text_value, sqlite3_int64 int_value, const sqlite3_value *sql_value, int bind_type) {
+static int dbmem_settings_write (sqlite3 *db, const char *key, const char *text_value, sqlite3_int64 int_value, const sqlite3_value *sql_value, int bind_type) {
     static const char *sql = "REPLACE INTO dbmem_settings (key, value) VALUES (?1, ?2);";
     
     sqlite3_stmt *vm = NULL;
@@ -92,7 +101,7 @@ int dbmem_settings_write (sqlite3 *db, const char *key, const char *text_value, 
     switch (bind_type) {
         case SQLITE_TEXT: rc = sqlite3_bind_text(vm, 2, text_value, -1, NULL); break;
         case SQLITE_INTEGER: rc = sqlite3_bind_int64(vm, 2, int_value); break;
-        case DBMEM_TYPE_VALUE: rc = sqlite3_bind_value(vm, 2, sql_value);
+        case DBMEM_TYPE_VALUE: rc = sqlite3_bind_value(vm, 2, sql_value); break;
         default: rc = SQLITE_MISUSE; goto cleanup;
     }
     
@@ -100,23 +109,24 @@ int dbmem_settings_write (sqlite3 *db, const char *key, const char *text_value, 
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     
 cleanup:
+    if (rc != SQLITE_OK) DEBUG_DBMEM("Error in dbmem_settings_write: %s", sqlite3_errmsg(db));
     if (vm) sqlite3_finalize(vm);
     return rc;
 }
 
-int dbmem_settings_write_text (sqlite3 *db, const char *key, const char *value) {
+static int dbmem_settings_write_text (sqlite3 *db, const char *key, const char *value) {
     return dbmem_settings_write(db, key, value, 0, NULL, SQLITE_TEXT);
 }
 
-int dbmem_settings_write_int (sqlite3 *db, const char *key, sqlite3_int64 value) {
+static int dbmem_settings_write_int (sqlite3 *db, const char *key, sqlite3_int64 value) {
     return dbmem_settings_write(db, key, NULL, value, NULL, SQLITE_INTEGER);
 }
 
-int dbmem_settings_write_value (sqlite3 *db, const char *key, sqlite3_value *value) {
+static int dbmem_settings_write_value (sqlite3 *db, const char *key, sqlite3_value *value) {
     return dbmem_settings_write(db, key, NULL, 0, value, DBMEM_TYPE_VALUE);
 }
 
-int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_value *value) {
+static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_value *value) {
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_MAX_TOKENS) == 0) {
         int n = sqlite3_value_int(value);
         if (n > 0) ctx->max_tokens = n;
@@ -153,6 +163,12 @@ int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_value *val
         return 0;
     }
     
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_ENGINE_WARMUP) == 0) {
+        int n = sqlite3_value_int(value);
+        ctx->engine_warmup = (n > 0) ? 1 : 0;
+        return 0;
+    }
+    
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_PROVIDER) == 0) {
         char *provider = dbmem_strdup((const char *)sqlite3_value_text(value));
         if (provider) {
@@ -171,7 +187,173 @@ int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_value *val
         return 0;
     }
     
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_EXTENSIONS) == 0) {
+        char *extensions = dbmem_strdup((const char *)sqlite3_value_text(value));
+        if (extensions) {
+            if (ctx->extensions) dbmem_free(ctx->extensions);
+            ctx->extensions = extensions;
+        }
+        return 0;
+    }
+    
     return 0;
+}
+
+// MARK: - Database -
+
+static int dbmem_database_init (sqlite3 *db) {
+    const char *sql = "CREATE TABLE IF NOT EXISTS dbmem_settings (key TEXT PRIMARY KEY, value TEXT);";
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash INTEGER PRIMARY KEY NOT NULL, path TEXT NOT NULL UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL, context TEXT DEFAULT NULL);";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash INTEGER NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    
+    sql = "CREATE VIRTUAL TABLE IF NOT EXISTS dbmem_vault_fts USING fts5 (content, hash UNINDEXED, seq UNINDEXED, offset UNINDEXED, length UNINDEXED);";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        fts5_is_available = false;
+        rc = SQLITE_OK;
+    }
+    
+    return rc;
+}
+
+static bool dbmem_database_check_if_stored (sqlite3 *db, uint64_t hash, int64_t len) {
+    static const char *sql = "SELECT length FROM dbmem_content WHERE hash=? LIMIT 1;";
+    
+    bool result = false;
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)hash);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    else if (rc != SQLITE_ROW) goto cleanup;
+    
+    // SQLITE_ROW case
+    sqlite3_int64 saved_len = sqlite3_column_int64(vm, 0);
+    result = (saved_len == len);
+    
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return result;
+}
+
+static int dbmem_database_add_entry (dbmem_context *ctx, sqlite3 *db, uint64_t hash, const char *buffer, int64_t len) {
+    static const char *sql = "INSERT INTO dbmem_content (hash, path, value, length, context) VALUES (?1, ?2, ?3, ?4, ?5);";
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)hash);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    const char *path = ctx->path;
+    char uuid[DBMEM_UUID_STR_MAXLEN];
+    if (path == NULL) path = dbmem_uuid_v7(uuid);
+    rc = sqlite3_bind_text(vm, 2, path, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = (ctx->save_content) ? sqlite3_bind_text(vm, 3, buffer, (int)len, SQLITE_STATIC) : sqlite3_bind_null(vm, 3);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 4, (sqlite3_int64)len);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = (ctx->context) ? sqlite3_bind_text(vm, 5, ctx->context, -1, SQLITE_STATIC) : sqlite3_bind_null(vm, 5);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    
+cleanup:
+    if (rc != SQLITE_OK) DEBUG_DBMEM_ALWAYS("Error in dbmem_database_add_entry: %s", sqlite3_errmsg(ctx->db));
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_database_add_chunk (dbmem_context *ctx, embedding_result_t *result, size_t offset, size_t length, size_t index) {
+    static const char *sql = "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES (?1, ?2, ?3, ?4, ?5);";
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)ctx->hash);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 2, (sqlite3_int64)index);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_blob(vm, 3, result->embedding, (int)(result->n_embd * sizeof(float)), SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 4, (sqlite3_int64)offset);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 5, (sqlite3_int64)length);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    
+cleanup:
+    if (rc != SQLITE_OK) DEBUG_DBMEM_ALWAYS("Error in dbmem_database_add_chunk: %s", sqlite3_errmsg(ctx->db));
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_database_add_fts5 (dbmem_context *ctx, const char *text, size_t text_len, size_t offset, size_t length, size_t index) {
+    static const char *sql = "INSERT INTO dbmem_vault_fts (content, hash, seq, offset, length) VALUES (?1, ?2, ?3, ?4, ?5);";
+    
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_text(vm, 1, text, (int)text_len, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 2, (sqlite3_int64)ctx->hash);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 3, (sqlite3_int64)index);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 4, (sqlite3_int64)offset);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_bind_int64(vm, 5, (sqlite3_int64)length);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    
+cleanup:
+    if (rc != SQLITE_OK) DEBUG_DBMEM_ALWAYS("Error in dbmem_database_add_fts5: %s", sqlite3_errmsg(ctx->db));
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_database_begin_transaction (sqlite3 *db) {
+    return sqlite3_exec(db, "SAVEPOINT " DBMEM_SAVEPOINT_NAME ";", NULL, NULL, NULL);
+}
+
+static int dbmem_database_commit_transaction (sqlite3 *db) {
+    return sqlite3_exec(db, "RELEASE " DBMEM_SAVEPOINT_NAME ";", NULL, NULL, NULL);
+}
+
+static int dbmem_database_rollback_transaction (sqlite3 *db) {
+    return sqlite3_exec(db, "ROLLBACK TO " DBMEM_SAVEPOINT_NAME "; RELEASE " DBMEM_SAVEPOINT_NAME ";", NULL, NULL, NULL);
 }
 
 // MARK: - Context -
@@ -186,17 +368,39 @@ static void *dbmem_context_create (sqlite3 *db) {
     ctx->overlay_tokens = DEFAULT_OVERLAY_TOKENS;
     ctx->snippet_max_chars = DEFAULT_MAX_SNIPPET_CHARS;
     ctx->skip_html = true;
+    ctx->engine_warmup = false;
     
     return (void *)ctx;
 }
 
 static void dbmem_context_free (void *ptr) {
-    if (ptr) sqlite3_free(ptr);
+    if (!ptr) return;
+    dbmem_context *ctx = (dbmem_context *)ptr;
+
+    if (ctx->provider) dbmem_free(ctx->provider);
+    if (ctx->model) dbmem_free(ctx->model);
+    if (ctx->api_key) dbmem_free(ctx->api_key);
+    if (ctx->extensions) dbmem_free(ctx->extensions);
+
+    #ifndef DBMEM_OMIT_LOCAL_ENGINE
+    if (ctx->engine) dbmem_local_engine_free(ctx->engine);
+    #endif
+
+    dbmem_free(ctx);
+}
+
+static void dbmem_context_reset_temp_values (dbmem_context *ctx) {
+    ctx->counter = 0;
+    ctx->hash = 0;
+    ctx->context = NULL;
+    ctx->path = NULL;
+    ctx->error_msg[0] = 0;
 }
 
 // MARK: - General -
 
 static void dbmem_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc); UNUSED_PARAM(argv);
     sqlite3_result_text(context, SQLITE_DBMEMORY_VERSION, -1, NULL);
 }
 
@@ -216,12 +420,28 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     const char *provider = (const char *)sqlite3_value_text(argv[0]);
     const char *model = (const char *)sqlite3_value_text(argv[1]);
     
+    // retrieve context
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    
     // if provider is local then make sure model file exists
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
     if (strcasecmp(provider, DBMEM_LOCAL_PROVIDER) == 0) {
         if (dbmem_file_exists(model) == false) {
             sqlite3_result_error(context, "Local model not found in the specified path", SQLITE_ERROR);
             return;
+        }
+        
+        if (ctx->engine) dbmem_local_engine_free(ctx->engine);
+        ctx->engine = NULL;
+        
+        ctx->engine = dbmem_local_engine_init(model, ctx->error_msg);
+        if (ctx->engine == NULL) {
+            sqlite3_result_error(context, ctx->error_msg, -1);
+            return;
+        }
+        
+        if (ctx->engine_warmup) {
+            dbmem_local_engine_warmup(ctx->engine);
         }
     }
     #endif
@@ -235,7 +455,25 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
 }
 
 static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value **argv) {
-
+    // sanity check type
+    if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "The function memory_set_apikey expects one argument of type TEXT", SQLITE_ERROR);
+        return;
+    }
+    
+    char *apikey = dbmem_strdup((const char *)sqlite3_value_text(argv[0]));
+    if (!apikey) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+    
+    // retrieve context
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    
+    if (ctx->api_key) dbmem_free(ctx->api_key);
+    ctx->api_key = apikey;
+    
+    sqlite3_result_int(context, 1);
 }
 
 // MARK: -
@@ -243,7 +481,7 @@ static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value 
 static void dbmem_set_option (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function dbmem_set_option expects the key argument to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_set_option expects the key argument to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -267,7 +505,7 @@ static void dbmem_get_option (sqlite3_context *context, int argc, sqlite3_value 
     
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function dbmem_get_option expects the key argument to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_get_option expects the key argument to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -297,47 +535,143 @@ cleanup:
 
 // MARK: -
 
+#if ENABLE_DBMEM_DEBUG
+static void dbmem_dump_embeding (const embedding_result_t *result) {
+    printf("{\n");
+    printf("  \"n_tokens\": %d,\n", result->n_tokens);
+    printf("  \"n_tokens_truncated\": %d,\n", result->n_tokens_truncated);
+    printf("  \"n_embd\": %d,\n", result->n_embd);
+    printf("  \"embedding\": [");
+
+    for (int i = 0; i < result->n_embd; i++) {
+        printf("%.8f", result->embedding[i]);
+        if (i < result->n_embd - 1) printf(", ");
+    }
+
+    printf("]\n");
+    printf("}\n");
+    fflush(stdout);
+}
+#endif
+
+static int dbmem_process_callback (const char *text, size_t len, size_t offset, size_t length, void *xdata, size_t index) {
+    dbmem_context *ctx = (dbmem_context *)xdata;
+    embedding_result_t result = {0};
+    
+    // compute embedding
+    int rc = dbmem_local_compute_embedding(ctx->engine, text, (int)len, &result);
+    if (rc != 0) {
+        const char *err = dbmem_local_errmsg(ctx->engine);
+        memcpy(ctx->error_msg, err, strlen(err) + 1);
+        return rc;
+    }
+    
+    // save embedding to database
+    rc = dbmem_database_add_chunk(ctx, &result, offset, length, index);
+    if (rc != 0) {
+        const char *err = sqlite3_errmsg(ctx->db);
+        memcpy(ctx->error_msg, err, strlen(err) + 1);
+        goto cleanup;
+    }
+    DEBUG_EMBEDDING(&result);
+
+    // save FTS5 (if available)
+    if (!fts5_is_available) goto cleanup;
+    rc = dbmem_database_add_fts5(ctx, text, len, offset, length, index);
+    if (rc != 0) {
+        const char *err = sqlite3_errmsg(ctx->db);
+        memcpy(ctx->error_msg, err, strlen(err) + 1);
+        goto cleanup;
+    }
+    
+cleanup:
+    return rc;
+}
+
 static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t len) {
+    // check if buffer was already processed
+    uint64_t hash = dbmem_hash_compute (buffer, (size_t)len);
+    if (dbmem_database_check_if_stored(ctx->db, hash, len)) return SQLITE_OK;
+    
+    // set up parse settings
     dbmem_parse_settings settings = {0};
+    
+    ctx->hash = hash;
+    settings.xdata = (void *)ctx;
+    settings.callback = dbmem_process_callback;
     settings.chars_per_token = ctx->chars_per_tokens;
     settings.max_tokens = ctx->max_tokens;
     settings.overlay_tokens = ctx->overlay_tokens;
     settings.skip_semantic = ctx->skip_semantic;
     settings.skip_html = ctx->skip_html;
     
-    int rc = dbmem_parse(buffer, (size_t)len, &settings);
+    sqlite3 *db = ctx->db;
+    int rc = dbmem_database_begin_transaction(db);
+    if (rc != SQLITE_OK) goto cleanup;
     
-    return 0;
+    rc = dbmem_database_add_entry(ctx, db, hash, buffer, len);
+    if (rc != SQLITE_OK) goto cleanup;
+    
+    rc = dbmem_parse(buffer, (size_t)len, &settings);
+    
+cleanup:
+    (rc == SQLITE_OK) ? dbmem_database_commit_transaction(db) : dbmem_database_rollback_transaction(db);
+    return rc;
 }
 
 static int dbmem_process_file (dbmem_context *ctx, const char *path) {
     if (!dbmem_file_exists(path)) {
-        snprintf(ctx->error_msg, DBMEM_MAXERROR_SIZE, "Unable to find file at path %s", path);
+        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to find file at path %s", path);
         return -1;
     }
+    
+    // check if the file needs to be skipped based on its extension
+    char *extensions = (ctx->extensions) ? ctx->extensions : "md,mdx";
+    if (extensions && !dbmem_file_has_extension(path, extensions)) return 0;
     
     int64_t len = 0;
     char *buffer = dbmem_file_read(path, &len);
     if (!buffer) {
-        snprintf(ctx->error_msg, DBMEM_MAXERROR_SIZE, "Unable to read file at path %s", path);
+        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to read file at path %s", path);
         return -1;
     }
     
     // do real processing
-    return dbmem_process_buffer(ctx, buffer, len);
+    ctx->path = path;
+    int rc = dbmem_process_buffer(ctx, buffer, len);
+    
+    dbmem_free(buffer);
+    return rc;
+}
+
+static int dbmem_scan_callback (const char *path, void *data) {
+    dbmem_context *ctx = (dbmem_context *)data;
+    
+    int rc = dbmem_process_file(ctx, path);
+    if (rc == 0) ctx->counter++;
+    
+    return rc;
 }
 
 static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function dbmem_add_text expects a parameter of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_text expects a parameter of type TEXT", SQLITE_ERROR);
         return;
     }
     
-    // retrieve context
+    // retrieve dbmem_context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
     const char *content = (const char *)sqlite3_value_text(argv[0]);
     int len = sqlite3_value_bytes(argv[0]);
+    
+    // reset temp values
+    dbmem_context_reset_temp_values(ctx);
+    
+    // check for optional memory context
+    if ((argc == 2) && (sqlite3_value_type(argv[1]) == SQLITE_TEXT)) {
+        ctx->context = (const char *)sqlite3_value_text(argv[1]);
+    }
     
     int rc = dbmem_process_buffer(ctx, content, len);
     (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
@@ -347,20 +681,53 @@ static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **
 static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function dbmem_add_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
-    // retrieve context
+    // retrieve dbmem_context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
     const char *path = (const char *)sqlite3_value_text(argv[0]);
-    int rc = dbmem_process_file(ctx, path);
     
+    // reset temp values
+    dbmem_context_reset_temp_values(ctx);
+    
+    // check for optional memory context
+    if ((argc == 2) && (sqlite3_value_type(argv[1]) == SQLITE_TEXT)) {
+        ctx->context = (const char *)sqlite3_value_text(argv[1]);
+    }
+    
+    int rc = dbmem_process_file(ctx, path);
     (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
 
 static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    // sanity check type
+    if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "The function memory_add_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        return;
+    }
     
+    // retrieve dbmem_context
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    const char *path = (const char *)sqlite3_value_text(argv[0]);
+    
+    // reset temp values
+    dbmem_context_reset_temp_values(ctx);
+    
+    // check for optional memory context
+    if ((argc == 2) && (sqlite3_value_type(argv[1]) == SQLITE_TEXT)) {
+        ctx->context = (const char *)sqlite3_value_text(argv[1]);
+    }
+    
+    if (!dbmem_dir_exists(path)) {
+        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to find directory at path %s", path);
+        sqlite3_result_error(context, ctx->error_msg, SQLITE_ERROR);
+        return;
+    }
+    
+    int rc = dbmem_dir_scan(path, dbmem_scan_callback, ctx);
+    (rc == 0) ? sqlite3_result_int64(context, ctx->counter) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
 #endif
     
@@ -385,7 +752,7 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     
     void *ctx = dbmem_context_create(db);
     if (!ctx) {
-        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Not enought memory to create a database context");
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Not enough memory to create a database context");
         return SQLITE_NOMEM;
     }
     

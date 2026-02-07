@@ -12,32 +12,18 @@
 
 typedef struct dbmem_local_engine_t dbmem_local_engine_t;
 
-// Result structure for a single chunk
+// Embedding result structure (always one embedding per call)
 typedef struct {
-    int      index;
-    int      token_start;
-    int      token_length;
-    int      char_start;
-    int      char_length;
-    float   *embedding;
-} chunk_result_t;
-
-// Overall result structure
-typedef struct {
-    int              total_tokens;
-    int              total_chars;
-    int              n_embd;
-    int              chunk_size;
-    int              overlap;
-    int              n_chunks;
-    chunk_result_t  *chunks;
-    bool             used_pool;  // If true, don't free individual embeddings
-    char             err_msg[DBMEM_MAXERROR_SIZE];
+    int      n_tokens;              // Number of tokens processed
+    int      n_tokens_truncated;    // Number of tokens truncated (0 if none)
+    int      n_embd;                // Embedding dimension
+    float    *embedding;            // Pointer to embedding (points to engine's buffer, do not free)
 } embedding_result_t;
 
-dbmem_local_engine_t *dbmem_local_engine_init (const char *model_path, char err_msg[DBMEM_MAXERROR_SIZE]);
+dbmem_local_engine_t *dbmem_local_engine_init (const char *model_path, char err_msg[DBMEM_ERRBUF_SIZE]);
 int  dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *text, int text_len, embedding_result_t *result);
 bool dbmem_local_engine_warmup (dbmem_local_engine_t *engine);
 void dbmem_local_engine_free (dbmem_local_engine_t *engine);
+const char *dbmem_local_errmsg (dbmem_local_engine_t *engine);
 
 #endif
