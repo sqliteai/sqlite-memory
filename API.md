@@ -342,16 +342,16 @@ SELECT * FROM memory_search WHERE query = 'search text';
 |--------|------|-------------|
 | `query` | TEXT (HIDDEN) | Search query (required in WHERE clause) |
 | `hash` | INTEGER | Content hash identifier |
-| `path` | TEXT | Source path or generated UUID |
+| `path` | TEXT | Source file path or generated UUID for text content |
 | `context` | TEXT | Context label (NULL if not set) |
-| `snippet` | TEXT | Text snippet from matching chunk |
-| `score` | REAL | Combined similarity score (0.0 - 1.0) |
+| `snippet` | TEXT | Text snippet from the matching chunk |
+| `ranking` | REAL | Combined similarity score (0.0 - 1.0) |
 
 **Notes:**
 - Requires sqlite-vector extension loaded first
 - Performs hybrid search combining vector similarity and FTS5
 - Results are ranked by combined score
-- Limited by `max_items` setting (default: 20)
+- Limited by `max_results` setting (default: 20)
 - Filtered by `min_score` setting (default: 0.7)
 - Updates `last_accessed` timestamp if `update_access` is enabled
 
@@ -360,11 +360,11 @@ SELECT * FROM memory_search WHERE query = 'search text';
 -- Basic search
 SELECT * FROM memory_search WHERE query = 'database indexing strategies';
 
--- Search with score filter
-SELECT path, snippet, score
+-- Search with ranking filter
+SELECT path, snippet, ranking
 FROM memory_search
 WHERE query = 'how to optimize queries'
-AND score > 0.8;
+AND ranking > 0.8;
 
 -- Search within a specific context
 SELECT * FROM memory_search
@@ -389,7 +389,7 @@ AND context = 'meetings';
 | `skip_html` | INTEGER | 1 | Strip HTML tags when parsing |
 | `extensions` | TEXT | "md,mdx" | Comma-separated file extensions to process |
 | `engine_warmup` | INTEGER | 0 | Warm up engine on model load (compiles GPU shaders) |
-| `max_items` | INTEGER | 20 | Maximum search results |
+| `max_results` | INTEGER | 20 | Maximum search results |
 | `fts_enabled` | INTEGER | 1 | Enable FTS5 in hybrid search |
 | `vector_weight` | REAL | 0.5 | Weight for vector similarity in scoring |
 | `text_weight` | REAL | 0.5 | Weight for FTS in scoring |
@@ -449,7 +449,7 @@ SELECT memory_add_text('SQLite is a C library that provides a lightweight disk-b
 SELECT memory_add_directory('/docs/sqlite', 'sqlite-docs');
 
 -- Search
-SELECT path, snippet, score
+SELECT path, snippet, ranking
 FROM memory_search
 WHERE query = 'how does SQLite store data on disk';
 

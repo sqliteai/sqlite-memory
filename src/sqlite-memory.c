@@ -50,7 +50,7 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_SKIP_HTML            "skip_html"
 #define DBMEM_SETTINGS_KEY_EXTENSIONS           "extensions"
 #define DBMEM_SETTINGS_KEY_ENGINE_WARMUP        "engine_warmup"
-#define DBMEM_SETTINGS_KEY_MAX_ITEMS            "max_items"
+#define DBMEM_SETTINGS_KEY_MAX_RESULTS          "max_results"
 #define DBMEM_SETTINGS_KEY_FTS_ENABLED          "fts_enabled"
 #define DBMEM_SETTINGS_KEY_VECTOR_WEIGHT        "vector_weight"
 #define DBMEM_SETTINGS_KEY_TEXT_WEIGHT          "text_weight"
@@ -62,7 +62,7 @@ SQLITE_EXTENSION_INIT1
 #define DEFAULT_MAX_TOKENS                      400
 #define DEFAULT_OVERLAY_TOKENS                  80
 #define DEFAULT_MAX_SNIPPET_CHARS               700
-#define DEFAULT_MAX_ITEMS                       20
+#define DEFAULT_MAX_RESULTS                     20
 #define DEFAULT_VECTOR_WEIGHT                   0.5
 #define DEFAULT_TEXT_WEIGHT                     0.5
 #define DEFAULT_MIN_SCORE                       0.7
@@ -99,7 +99,7 @@ struct dbmem_context {
     bool        dimension_saved;                // Embedding dimension needs to be automatically serialized
 
     // Settings
-    int         max_items;                      // Maximum number of items to be returned from a search
+    int         max_results;                    // Maximum number of results to be returned from a search
     double      vector_weight;                  // Weight of the vector results during the merge of the result
     double      text_weight;                    // Weight of the FTS results during the merge of the result
     double      min_score;                      // Minimum score threshold to filter irrelevant results
@@ -212,9 +212,9 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
         return 0;
     }
     
-    if (strcasecmp(key, DBMEM_SETTINGS_KEY_MAX_ITEMS) == 0) {
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_MAX_RESULTS) == 0) {
         int n = sqlite3_value_int(value);
-        if (n > 0) ctx->max_items = n;
+        if (n > 0) ctx->max_results = n;
         return 0;
     }
     
@@ -470,7 +470,7 @@ static void *dbmem_context_create (sqlite3 *db) {
     ctx->engine_warmup = false;
     
     ctx->perform_fts = fts5_is_available;
-    ctx->max_items = DEFAULT_MAX_ITEMS;
+    ctx->max_results = DEFAULT_MAX_RESULTS;
     ctx->vector_weight = DEFAULT_VECTOR_WEIGHT;
     ctx->text_weight = DEFAULT_TEXT_WEIGHT;
     ctx->min_score = DEFAULT_MIN_SCORE;
@@ -567,8 +567,8 @@ bool dbmem_context_perform_fts (dbmem_context *ctx) {
     return ctx->perform_fts;
 }
 
-int dbmem_context_max_items (dbmem_context *ctx) {
-    return ctx->max_items;
+int dbmem_context_max_results (dbmem_context *ctx) {
+    return ctx->max_results;
 }
 
 double dbmem_context_vector_weight (dbmem_context *ctx) {

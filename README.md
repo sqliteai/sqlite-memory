@@ -92,17 +92,17 @@ systems, and AI applications.', 'concepts');
 SELECT memory_add_directory('/path/to/docs', 'project-docs');
 
 -- Search your memory semantically
-SELECT path, snippet, score
+SELECT path, snippet, ranking
 FROM memory_search
 WHERE query = 'how do databases store information efficiently';
 
 -- Results ranked by semantic similarity + keyword matching
--- ┌──────────────┬─────────────────────────────────────┬───────┐
--- │     path     │               snippet               │ score │
--- ├──────────────┼─────────────────────────────────────┼───────┤
--- │ (uuid)       │ SQLite is a C-language library...   │ 0.89  │
--- │ (uuid)       │ Vector databases store data as...   │ 0.82  │
--- └──────────────┴─────────────────────────────────────┴───────┘
+-- ┌──────────────┬─────────────────────────────────────┬─────────┐
+-- │     path     │               snippet               │ ranking │
+-- ├──────────────┼─────────────────────────────────────┼─────────┤
+-- │ (uuid)       │ SQLite is a C-language library...   │ 0.89    │
+-- │ (uuid)       │ Vector databases store data as...   │ 0.82    │
+-- └──────────────┴─────────────────────────────────────┴─────────┘
 ```
 
 ### Example: Building an AI Agent with Memory
@@ -127,9 +127,9 @@ def remember(content, context="conversation"):
 # Retrieve relevant memories
 def recall(query, min_score=0.7):
     cursor = conn.execute("""
-        SELECT snippet, score FROM memory_search
-        WHERE query = ? AND score > ?
-        ORDER BY score DESC
+        SELECT snippet, ranking FROM memory_search
+        WHERE query = ? AND ranking > ?
+        ORDER BY ranking DESC
     """, (query, min_score))
     return cursor.fetchall()
 
@@ -161,7 +161,7 @@ SELECT memory_set_option('max_tokens', 512);      -- Tokens per chunk
 SELECT memory_set_option('overlay_tokens', 100);  -- Overlap between chunks
 
 -- Search behavior
-SELECT memory_set_option('max_items', 30);        -- Max results
+SELECT memory_set_option('max_results', 30);      -- Max search results
 SELECT memory_set_option('min_score', 0.75);      -- Score threshold
 SELECT memory_set_option('vector_weight', 0.6);   -- Vector vs FTS balance
 SELECT memory_set_option('text_weight', 0.4);

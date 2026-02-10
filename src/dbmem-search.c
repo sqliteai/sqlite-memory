@@ -30,6 +30,8 @@ SQLITE_EXTENSION_INIT3
 #define SEARCH_COLUMN_HASH                      3
 #define SEARCH_COLUMN_SEQ                       4
 #define SEARCH_COLUMN_RANKING                   5
+#define SEARCH_COLUMN_PATH                      6
+#define SEARCH_COLUMN_SNIPPET                   7
 
 typedef struct {
     sqlite3_vtab    base;                   // Base class - must be first
@@ -39,7 +41,7 @@ typedef struct {
 
 typedef struct {
     sqlite3_vtab_cursor base;               // Base class - must be first
-    int             max_items;
+    int             max_results;
     bool            perform_fts;
 
     int             index;
@@ -117,7 +119,7 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     if (!buffer) return SQLITE_NOMEM;
 
     // adjust all internal pointers
-    c->max_items = entries;
+    c->max_results = entries;
     c->perform_fts = perform_fts;
     c->buffer = buffer;
 
@@ -162,7 +164,7 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     return SQLITE_OK;
 }
 
-int vMemorySearchCursorMerge(vMemorySearchCursor *c, double vectorWeight, double textWeight, double min_score, int max_items) {
+int vMemorySearchCursorMerge(vMemorySearchCursor *c, double vectorWeight, double textWeight, double min_score, int max_results) {
     c->merge.count = 0;
 
     // add semantic (vector) results
@@ -244,7 +246,7 @@ int vMemorySearchCursorMerge(vMemorySearchCursor *c, double vectorWeight, double
 
     // copy top results to final cursor arrays, filtering by min_score
     c->count = 0;
-    for (int i = 0; i < c->merge.count && c->count < max_items; i++) {
+    for (int i = 0; i < c->merge.count && c->count < max_results; i++) {
         if (c->merge.textScore[i] < min_score) break;  // sorted descending, so stop at first below threshold
         c->hash[c->count] = c->merge.hash[i];
         c->seq[c->count] = c->merge.seq[i];
@@ -430,7 +432,7 @@ static int vMemorySearchConnect (sqlite3 *db, void *pAux, int argc, const char *
     }
     
     // https://www.sqlite.org/vtab.html#table_valued_functions
-    int rc = sqlite3_declare_vtab(db, "CREATE TABLE x(query hidden, max_entries hidden, context hidden, hash, seq, ranking);");
+    int rc = sqlite3_declare_vtab(db, "CREATE TABLE x(query hidden, max_entries hidden, context hidden, hash, seq, ranking, path, snippet);");
     if (rc != SQLITE_OK) return rc;
     
     vMemorySearchTable *vtab = (vMemorySearchTable *)dbmem_zeroalloc(sizeof(vMemorySearchTable));
@@ -506,19 +508,36 @@ static int vMemorySearchCursorEof (sqlite3_vtab_cursor *cur){
 }
 
 static int vMemorySearchCursorColumn (sqlite3_vtab_cursor *cur, sqlite3_context *context, int iCol) {
+    static const char *path_sql = "SELECT path FROM dbmem_content WHERE hash = ?1;";
+    static const char *snippet_sql = "SELECT substr(c.value, v.offset + 1, v.length) FROM dbmem_vault v JOIN dbmem_content c ON v.hash = c.hash WHERE v.hash = ?1 AND v.seq = ?2;";
+    
     vMemorySearchCursor *c = (vMemorySearchCursor *)cur;
+    sqlite3 *db = ((vMemorySearchTable *)cur->pVtab)->db;
     
     switch (iCol) {
         case SEARCH_COLUMN_HASH:
-            sqlite3_result_int64(context, (sqlite3_int64)c->hash[c->index]);
+            sqlite3_result_int64(context, c->hash[c->index]);
             break;
             
         case SEARCH_COLUMN_SEQ:
-            sqlite3_result_int64(context, (sqlite3_int64)c->seq[c->index]);
+            sqlite3_result_int64(context, c->seq[c->index]);
             break;
             
         case SEARCH_COLUMN_RANKING:
             sqlite3_result_double(context, c->rank[c->index]);
+            break;
+            
+        case SEARCH_COLUMN_PATH:
+        case SEARCH_COLUMN_SNIPPET:{
+            const char *sql = (iCol == SEARCH_COLUMN_PATH) ? path_sql : snippet_sql;
+            sqlite3_stmt *vm = NULL;
+            if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(vm, 1, c->hash[c->index]);
+                if (iCol == SEARCH_COLUMN_SNIPPET) sqlite3_bind_int64(vm, 2, c->seq[c->index]);
+                if (sqlite3_step(vm) == SQLITE_ROW) sqlite3_result_value(context, sqlite3_column_value(vm, 0));
+            }
+            if (vm) sqlite3_finalize(vm);
+        }
             break;
     }
     
@@ -540,7 +559,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     sqlite3 *db = searchTab->db;
     
     // check and retrieve arguments
-    int  max_items = dbmem_context_max_items(ctx);
+    int  max_results = dbmem_context_max_results(ctx);
     bool perform_fts = dbmem_context_perform_fts(ctx);
     const char *query = NULL;
     const char *context = NULL;
@@ -559,14 +578,14 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     if (argc > 1) {
         // only the next two arguments are handled
         for (int i=1; i<argc && i<=2; ++i) {
-            if (sqlite3_value_type(argv[i]) == SQLITE_INTEGER) max_items = sqlite3_value_int(argv[i]);
+            if (sqlite3_value_type(argv[i]) == SQLITE_INTEGER) max_results = sqlite3_value_int(argv[i]);
             else if (sqlite3_value_type(argv[i]) == SQLITE_TEXT) context = (const char *)sqlite3_value_text(argv[i]);
             // ignore any other type
         }
     }
     
     // allocate internal cursor buffer
-    int rc = vMemorySearchCursorAllocate(c, max_items, perform_fts);
+    int rc = vMemorySearchCursorAllocate(c, max_results, perform_fts);
     if (rc != SQLITE_OK) return SQLITE_NOMEM;
     
     // perform semantic search
@@ -608,7 +627,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     }
     
     // perform search
-    rc = dbmem_semantic_search(db, c, result.embedding, (int)(result.n_embd * sizeof(float)), context, max_items);
+    rc = dbmem_semantic_search(db, c, result.embedding, (int)(result.n_embd * sizeof(float)), context, max_results);
     if (rc != 0) {
         sqlvTab->zErrMsg = sqlite3_mprintf("%s", sqlite3_errmsg(db));
         return SQLITE_ERROR;
@@ -617,7 +636,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     // perform fts search
     if (perform_fts) {
         // in case of FTS error ignore its contribution
-        rc = dbmem_fts_search(db, c, query, context, max_items);
+        rc = dbmem_fts_search(db, c, query, context, max_results);
         if (rc != SQLITE_OK) perform_fts = false;
     }
     
@@ -632,7 +651,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     double vectorWeight = dbmem_context_vector_weight(ctx);
     double textWeight = dbmem_context_text_weight(ctx);
     double min_score = dbmem_context_min_score(ctx);
-    vMemorySearchCursorMerge(c, vectorWeight, textWeight, min_score, max_items);
+    vMemorySearchCursorMerge(c, vectorWeight, textWeight, min_score, max_results);
 
     // update last_accessed timestamps for returned results
     if (dbmem_context_update_access(ctx) && c->count > 0) {
