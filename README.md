@@ -1,6 +1,6 @@
 # SQLite Memory
 
-A SQLite extension that gives AI agents persistent, searchable memory. Features hybrid semantic search (vector similarity + FTS5), markdown-aware chunking, and local embedding via llama.cpp. Memory databases can be synced between agents using offline **first technology** each agent works independently and syncs when connected, making it ideal for distributed AI systems, edge deployments, and collaborative agent architectures.
+A SQLite extension that gives AI agents persistent, searchable memory. Features hybrid semantic search (vector similarity + FTS5), markdown-aware chunking, and local embedding via llama.cpp. Memory databases can be synced between agents using **offline first technology** each agent works independently and syncs when connected, making it ideal for distributed AI systems, edge deployments, and collaborative agent architectures.
 
 ## The Future of AI Agent Memory
 
