@@ -23,7 +23,7 @@ A SQLite extension that provides semantic memory capabilities with hybrid search
 sqlite-memory enables semantic search over text content stored in SQLite. It:
 
 1. **Chunks** text content using semantic parsing (markdown-aware)
-2. **Generates embeddings** for each chunk using the built-in llama.cpp engine (`"local"` provider) or the [vector.space](https://vector.space) remote service
+2. **Generates embeddings** for each chunk using the built-in llama.cpp engine (`"local"` provider) or the [vectors.space](https://vectors.space) remote service
 3. **Stores** embeddings and full-text content for hybrid search
 4. **Searches** using vector similarity combined with FTS5 full-text search
 
@@ -77,15 +77,15 @@ Configures the embedding model to use.
 **Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `provider` | TEXT | `"local"` for built-in llama.cpp engine, or any other name (e.g., `"openai"`) for [vector.space](https://vector.space) remote service |
-| `model` | TEXT | For local: full path to GGUF model file. For remote: model identifier supported by vector.space |
+| `provider` | TEXT | `"local"` for built-in llama.cpp engine, or any other name (e.g., `"openai"`) for [vectors.space](https://vectors.space) remote service |
+| `model` | TEXT | For local: full path to GGUF model file. For remote: model identifier supported by vectors.space |
 
 **Returns:** INTEGER - 1 on success
 
 **Notes:**
 - When `provider` is `"local"`, the extension uses the built-in llama.cpp engine and verifies the model file exists
-- When `provider` is anything other than `"local"`, the extension uses the [vector.space](https://vector.space) remote embedding service
-- Remote embedding requires a free API key from [vector.space](https://vector.space) (set via `memory_set_apikey`)
+- When `provider` is anything other than `"local"`, the extension uses the [vectors.space](https://vectors.space) remote embedding service
+- Remote embedding requires a free API key from [vectors.space](https://vectors.space) (set via `memory_set_apikey`)
 - Settings are persisted in `dbmem_settings` table
 - For local models, the embedding engine is initialized immediately
 
@@ -94,7 +94,7 @@ Configures the embedding model to use.
 -- Local embedding model (uses built-in llama.cpp engine)
 SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 
--- Remote embedding via vector.space (requires free API key)
+-- Remote embedding via vectors.space (requires free API key)
 SELECT memory_set_model('openai', 'text-embedding-3-small');
 SELECT memory_set_apikey('your-vectorspace-api-key');
 ```
@@ -103,19 +103,19 @@ SELECT memory_set_apikey('your-vectorspace-api-key');
 
 #### `memory_set_apikey(key TEXT)`
 
-Sets the API key for the [vector.space](https://vector.space) remote embedding service.
+Sets the API key for the [vectors.space](https://vectors.space) remote embedding service.
 
 **Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `key` | TEXT | API key obtained from [vector.space](https://vector.space) (free account) |
+| `key` | TEXT | API key obtained from [vectors.space](https://vectors.space) (free account) |
 
 **Returns:** INTEGER - 1 on success
 
 **Notes:**
 - API key is stored in memory only, not persisted to disk
 - Required when using any provider other than `"local"`
-- Get a free API key by creating an account at [vector.space](https://vector.space)
+- Get a free API key by creating an account at [vectors.space](https://vectors.space)
 
 **Example:**
 ```sql
@@ -378,7 +378,7 @@ AND context = 'meetings';
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `provider` | TEXT | - | Embedding provider (`"local"` for llama.cpp, otherwise vector.space) |
+| `provider` | TEXT | - | Embedding provider (`"local"` for llama.cpp, otherwise vectors.space) |
 | `model` | TEXT | - | Model path (local) or identifier (remote) |
 | `dimension` | INTEGER | - | Embedding dimension (auto-detected) |
 | `max_tokens` | INTEGER | 400 | Maximum tokens per chunk |
@@ -529,7 +529,7 @@ LIMIT 10;
 |--------|-------------|
 | `DBMEM_OMIT_IO` | Omit file/directory functions (for WASM) |
 | `DBMEM_OMIT_LOCAL_ENGINE` | Omit llama.cpp local engine (for remote-only builds) |
-| `DBMEM_OMIT_REMOTE_ENGINE` | Omit vector.space remote engine (for local-only builds) |
+| `DBMEM_OMIT_REMOTE_ENGINE` | Omit vectors.space remote engine (for local-only builds) |
 | `SQLITE_CORE` | Compile as part of SQLite core (not as loadable extension) |
 
 ---
