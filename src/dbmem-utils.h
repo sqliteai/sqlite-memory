@@ -10,18 +10,25 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #define UNUSED_PARAM(p)                     (void)(p)
 #define ENABLE_DBMEM_DEBUG                  0
+#define ENABLE_DBMEM_DEBUG_EMBEDDING        0
 
 #define DEBUG_DBMEM_ALWAYS(...)             do {printf(__VA_ARGS__ );printf("\n");} while (0)
 
-#if ENABLE_DBMEM_DEBUG
-#define DEBUG_DBMEM(...)                    do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#if ENABLE_DBMEM_DEBUG_EMBEDDING
 #define DEBUG_EMBEDDING(_res)               do {dbmem_dump_embeding(_res);} while (0)
 #else
-#define DEBUG_DBMEM(...)
 #define DEBUG_EMBEDDING(_res)
+#endif
+
+#if ENABLE_DBMEM_DEBUG
+#define DEBUG_DBMEM(...)                    do {printf(__VA_ARGS__ );printf("\n");} while (0)
+#else
+#define DEBUG_DBMEM(...)
+
 #endif
 
 #define DBMEM_ERRBUF_SIZE                   1024

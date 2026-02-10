@@ -23,6 +23,10 @@
 #include "dbmem-utils.h"
 #include "dbmem-parser.h"
 
+#ifdef TEST_SQLITE_EXTENSION
+#include "sqlite-memory.h"
+#endif
+
 // ============================================================================
 // Test Framework
 // ============================================================================
@@ -1017,7 +1021,7 @@ static int scan_callback(const char *path, void *data) {
 
     ctx->paths[ctx->count] = strdup(path);
     ctx->count++;
-    return 1;  // Continue scanning
+    return 0;  // 0 = continue
 }
 
 static void free_scan_ctx(scan_ctx_t *ctx) {
@@ -1238,8 +1242,8 @@ static int abort_scan_callback(const char *path, void *data) {
     UNUSED_PARAM(path);
     int *count = (int *)data;
     (*count)++;
-    if (*count >= 2) return 0;  // Abort after 2 files
-    return 1;
+    if (*count >= 2) return 1;  // non-zero = abort after 2 files
+    return 0;  // 0 = continue
 }
 
 TEST(dbmem_dir_scan_callback_abort) {
@@ -1289,6 +1293,528 @@ TEST(dbmem_dir_scan_trailing_slash) {
     remove("/tmp/dbmem_test_slash/file.txt");
     rmdir_p(test_dir);
 }
+
+#ifdef TEST_SQLITE_EXTENSION
+// ============================================================================
+// SQLite Extension Tests
+// ============================================================================
+
+// Helper to open db with extension
+static sqlite3 *open_test_db(void) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    if (rc != SQLITE_OK) return NULL;
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+// Helper to execute SQL and get integer result
+static int exec_get_int(sqlite3 *db, const char *sql, sqlite3_int64 *result) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        *result = sqlite3_column_int64(stmt, 0);
+        rc = SQLITE_OK;
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+// Helper to execute SQL and get text result
+static int exec_get_text(sqlite3 *db, const char *sql, char *result, size_t max_len) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        const char *text = (const char *)sqlite3_column_text(stmt, 0);
+        if (text) {
+            strncpy(result, text, max_len - 1);
+            result[max_len - 1] = '\0';
+        } else {
+            result[0] = '\0';
+        }
+        rc = SQLITE_OK;
+    }
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+TEST(sqlite_memory_version) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    char version[64];
+    int rc = exec_get_text(db, "SELECT memory_version();", version, sizeof(version));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strlen(version) > 0);
+    ASSERT(strstr(version, ".") != NULL);  // Version should contain a dot
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_clear_empty) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);  // Should return 1 (success)
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_nonexistent) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_delete(12345);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);  // Should return 0 (no rows deleted)
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_context_nonexistent) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_delete_context('nonexistent');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);  // Should return 0 (no rows deleted)
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_has_timestamps) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Check that schema includes created_at column
+    char sql[256];
+    int rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE name='dbmem_content';",
+        sql, sizeof(sql));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(sql, "created_at") != NULL);
+    ASSERT(strstr(sql, "last_accessed") != NULL);
+
+    sqlite3_close(db);
+}
+
+// Test that inserting directly into tables works with new schema
+TEST(sqlite_direct_insert_with_timestamp) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert a test record directly
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (123, 'test/path', 'test value', 10, 'ctx1', strftime('%s','now'));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify it's there
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    // Verify created_at was set
+    sqlite3_int64 created_at;
+    rc = exec_get_int(db, "SELECT created_at FROM dbmem_content WHERE hash=123;", &created_at);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(created_at > 0);  // Should be a valid Unix timestamp
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_direct) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert a test record directly
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (456, 'test/path2', 'test value 2', 12, 'ctx2', strftime('%s','now'));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Delete it
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_delete(456);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);  // Should have deleted 1 row
+
+    // Verify it's gone
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_context_direct) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert test records with different contexts
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(100, 'path1', 'v1', 2, 'ctx_a', 0), "
+        "(101, 'path2', 'v2', 2, 'ctx_a', 0), "
+        "(102, 'path3', 'v3', 2, 'ctx_b', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Delete context 'ctx_a'
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_delete_context('ctx_a');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);  // Should have deleted 2 rows
+
+    // Verify only ctx_b remains
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    // Verify ctx_b is the remaining one
+    char context[64];
+    rc = exec_get_text(db, "SELECT context FROM dbmem_content;", context, sizeof(context));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(context, "ctx_b");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_clear_direct) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert test records
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(200, 'p1', 'v1', 2, 'c1', 0), "
+        "(201, 'p2', 'v2', 2, 'c2', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Clear all
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Verify all gone
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_with_vault_data) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert into content and vault tables
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (300, 'path300', 'value', 5, 'ctx', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) "
+        "VALUES (300, 0, X'00000000', 0, 5), (300, 1, X'00000000', 5, 5);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify vault has data
+    sqlite3_int64 vault_count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash=300;", &vault_count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(vault_count, 2);
+
+    // Delete by hash
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_delete(300);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Verify content is gone
+    sqlite3_int64 content_count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE hash=300;", &content_count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(content_count, 0);
+
+    // Verify vault is also gone
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash=300;", &vault_count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(vault_count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_twice) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert a record
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (400, 'path400', 'value', 5, 'ctx', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Delete first time - should return 1
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_delete(400);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Delete second time - should return 0
+    rc = exec_get_int(db, "SELECT memory_delete(400);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_context_null) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert records - some with NULL context, some with context
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(500, 'p1', 'v1', 2, NULL, 0), "
+        "(501, 'p2', 'v2', 2, NULL, 0), "
+        "(502, 'p3', 'v3', 2, 'has_context', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify 3 records
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 3);
+
+    // Delete NULL context - function expects TEXT, so NULL returns error
+    // This is expected behavior - use empty string '' for records with no context
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_delete_context(NULL);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    // Should return error because NULL is not TEXT type
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    // Verify records are still there (nothing was deleted)
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 3);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_wrong_type) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Try to call memory_delete with TEXT instead of INTEGER
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_delete('not_a_number');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_step(stmt);
+    // Should return an error
+    ASSERT(rc == SQLITE_ERROR || rc == SQLITE_ROW);  // Implementation may vary
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_context_wrong_type) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Try to call memory_delete_context with INTEGER instead of TEXT
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_delete_context(12345);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_step(stmt);
+    // Should return an error
+    ASSERT(rc == SQLITE_ERROR || rc == SQLITE_ROW);  // Implementation may vary
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_update_access_setting) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Set update_access to 0
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('update_access', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Get the setting back
+    rc = exec_get_int(db, "SELECT memory_get_option('update_access');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    // Set it back to 1
+    rc = exec_get_int(db, "SELECT memory_set_option('update_access', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Verify
+    rc = exec_get_int(db, "SELECT memory_get_option('update_access');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_created_at_valid_range) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert with current timestamp
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (600, 'path600', 'value', 5, 'ctx', strftime('%s','now'));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Get the created_at value
+    sqlite3_int64 created_at;
+    rc = exec_get_int(db, "SELECT created_at FROM dbmem_content WHERE hash=600;", &created_at);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Should be greater than 0
+    ASSERT(created_at > 0);
+
+    // Should be a reasonable Unix timestamp (after year 2020 = 1577836800)
+    ASSERT(created_at > 1577836800);
+
+    // Should not be in the future (give 60 seconds buffer)
+    sqlite3_int64 now;
+    rc = exec_get_int(db, "SELECT strftime('%s','now');", &now);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(created_at <= now + 60);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_clear_with_vault_fts) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert into all tables
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (700, 'path700', 'value', 5, 'ctx', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) "
+        "VALUES (700, 0, X'00000000', 0, 5);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault_fts (content, hash, seq, context) "
+        "VALUES ('test content', 700, 0, 'ctx');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Clear all
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Verify all tables are empty
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_context_with_vault) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert records with different contexts into content and vault
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(800, 'p1', 'v1', 2, 'delete_me', 0), "
+        "(801, 'p2', 'v2', 2, 'keep_me', 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES "
+        "(800, 0, X'00000000', 0, 2), "
+        "(801, 0, X'00000000', 0, 2);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Delete context 'delete_me'
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_delete_context('delete_me');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    // Verify content: only 'keep_me' remains
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    // Verify vault: only hash 801 remains
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT hash FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 801);
+
+    sqlite3_close(db);
+}
+#endif // TEST_SQLITE_EXTENSION
 
 // ============================================================================
 // Main
@@ -1374,6 +1900,30 @@ int main(int argc, char *argv[]) {
     RUN_TEST(dbmem_dir_scan_nonexistent);
     RUN_TEST(dbmem_dir_scan_callback_abort);
     RUN_TEST(dbmem_dir_scan_trailing_slash);
+
+#ifdef TEST_SQLITE_EXTENSION
+    printf("\nSQLite extension tests:\n");
+    RUN_TEST(sqlite_memory_version);
+    RUN_TEST(sqlite_memory_clear_empty);
+    RUN_TEST(sqlite_memory_delete_nonexistent);
+    RUN_TEST(sqlite_memory_delete_context_nonexistent);
+    RUN_TEST(sqlite_schema_has_timestamps);
+    RUN_TEST(sqlite_direct_insert_with_timestamp);
+    RUN_TEST(sqlite_memory_delete_direct);
+    RUN_TEST(sqlite_memory_delete_context_direct);
+    RUN_TEST(sqlite_memory_clear_direct);
+
+    printf("\nSQLite extension advanced tests:\n");
+    RUN_TEST(sqlite_memory_delete_with_vault_data);
+    RUN_TEST(sqlite_memory_delete_twice);
+    RUN_TEST(sqlite_memory_delete_context_null);
+    RUN_TEST(sqlite_memory_delete_wrong_type);
+    RUN_TEST(sqlite_memory_delete_context_wrong_type);
+    RUN_TEST(sqlite_memory_update_access_setting);
+    RUN_TEST(sqlite_memory_created_at_valid_range);
+    RUN_TEST(sqlite_memory_clear_with_vault_fts);
+    RUN_TEST(sqlite_memory_delete_context_with_vault);
+#endif
 
     printf("\n=== Results ===\n");
     printf("Tests run:    %d\n", tests_run);

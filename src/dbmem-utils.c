@@ -409,14 +409,14 @@ bool dbmem_dir_exists (const char *dir_path) {
 
 int dbmem_dir_scan (const char *dir_path, dir_scan_callback callback, void *data) {
     if (!dir_path || !callback) return -1;
-
+        
     size_t dir_len = strlen(dir_path);
     // Remove trailing separator for consistent path building
     while (dir_len > 0 && (dir_path[dir_len - 1] == '/' || dir_path[dir_len - 1] == '\\')) {
         dir_len--;
     }
     if (dir_len >= MAX_PATH - 2) return -1;  // Path too long
-
+        
     char full_path[MAX_PATH];
     memcpy(full_path, dir_path, dir_len);
 
@@ -450,7 +450,7 @@ int dbmem_dir_scan (const char *dir_path, dir_scan_callback callback, void *data
             if (result != 0) break;
         } else {
             // Regular file - invoke callback
-            if (!callback(full_path, data)) {
+            if (callback(full_path, data) != 0) {
                 result = -1;
                 break;
             }
@@ -511,7 +511,7 @@ int dbmem_dir_scan (const char *dir_path, dir_scan_callback callback, void *data
             if (result != 0) break;
         } else if (is_file) {
             // Regular file - invoke callback
-            if (!callback(full_path, data)) {
+            if (callback(full_path, data) != 0) {
                 result = -1;
                 break;
             }

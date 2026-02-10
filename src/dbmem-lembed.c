@@ -5,7 +5,7 @@
 //  Created by Marco Bambini on 04/02/26.
 //
 
-#include "dbmem-lembed.h"
+#include "dbmem-embed.h"
 #include "llama.h"
 #include "ggml.h"
 
