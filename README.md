@@ -34,7 +34,7 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 - **Hybrid Search**: Combines vector similarity (cosine distance) with FTS5 full-text search for superior retrieval
 - **Smart Chunking**: Markdown-aware parsing preserves semantic boundaries
 - **Efficient Storage**: Binary embeddings with configurable dimensions
-- **Flexible Embedding**: Use local models (llama.cpp) or [vector.space](https://vector.space) remote API
+- **Flexible Embedding**: Use local models (llama.cpp) or [vectors.space](https://vectors.space) remote API
 
 ## Architecture
 
@@ -58,10 +58,10 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 
 ### Prerequisites
 
-- SQLite 3.38+ with FTS5 support
+- SQLite
 - [sqlite-vector](https://github.com/sqliteai/sqlite-vector) extension
 - **For local embeddings**: A GGUF embedding model (e.g., [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF))
-- **For remote embeddings**: A free API key from [vector.space](https://vector.space)
+- **For remote embeddings**: A free API key from [vectors.space](https://vectors.space)
 
 ### Quick Start
 
@@ -75,7 +75,7 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 -- Option 1: Local embedding with llama.cpp (no internet required)
 SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 
--- Option 2: Remote embedding via vector.space (requires free API key from https://vector.space)
+-- Option 2: Remote embedding via vectors.space (requires free API key from https://vectors.space)
 -- SELECT memory_set_model('openai', 'text-embedding-3-small');
 -- SELECT memory_set_apikey('your-vectorspace-api-key');
 
@@ -216,7 +216,7 @@ make test
 | `make wasm` | ✗ | ✓ | ✗ |
 
 - **Local Engine**: Built-in llama.cpp for on-device embeddings (requires GGUF model)
-- **Remote Engine**: [vector.space](https://vector.space) API for cloud embeddings (requires free API key)
+- **Remote Engine**: [vectors.space](https://vectors.space) API for cloud embeddings (requires free API key)
 - **File I/O**: `memory_add_file` and `memory_add_directory` functions
 
 You can also combine options manually:
