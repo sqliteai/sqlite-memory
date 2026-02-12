@@ -152,14 +152,16 @@ else ifeq ($(PLATFORM),ios-sim)
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 -framework Security
 endif
 
-# Base llama.cpp cmake options (combined with LLAMA variable)
+# Base llama.cpp cmake options
 LLAMA_OPTIONS := $(LLAMA) \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
-    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_CURL=OFF \
     -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_TOOLS=OFF \
     -DLLAMA_BUILD_SERVER=OFF \
-    -DLLAMA_CURL=OFF
+    -DGGML_RPC=OFF
 
 # Conditional: Local embedding engine (llama.cpp)
 ifeq ($(OMIT_LOCAL_ENGINE),0)
