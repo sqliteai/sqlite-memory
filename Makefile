@@ -435,51 +435,51 @@ framework module memory {\
 }
 endef
 
+LIB_PREFIXES = ios ios-sim macos
 FMWK_NAMES = ios-arm64 ios-arm64_x86_64-simulator macos-arm64_x86_64
 XCFRAMEWORK_LLAMA = LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple"
 
 # Helper function to create xcframework from 3 dylibs
-# Usage: $(call create_xcframework,variant_suffix,output_name)
 define create_xcframework
-	@for pair in "ios:ios-arm64" "ios-sim:ios-arm64_x86_64-simulator" "macos:macos-arm64_x86_64"; do \
-		platform=$${pair%%:*}; \
-		fmwk=$${pair##*:}; \
+	@$(foreach i,1 2 3,\
+		prefix=$(word $(i),$(LIB_PREFIXES)); \
+		fmwk=$(word $(i),$(FMWK_NAMES)); \
 		mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Headers; \
 		mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Modules; \
 		cp src/sqlite-memory.h $(DIST_DIR)/$$fmwk/memory.framework/Headers; \
 		printf "$(PLIST)" > $(DIST_DIR)/$$fmwk/memory.framework/Info.plist; \
 		printf "$(MODULEMAP)" > $(DIST_DIR)/$$fmwk/memory.framework/Modules/module.modulemap; \
-		mv $(DIST_DIR)/$${platform}$(1).dylib $(DIST_DIR)/$$fmwk/memory.framework/memory; \
+		mv $(DIST_DIR)/$${prefix}$(1).dylib $(DIST_DIR)/$$fmwk/memory.framework/memory; \
 		install_name_tool -id "@rpath/memory.framework/memory" $(DIST_DIR)/$$fmwk/memory.framework/memory; \
-	done
+	)
 	xcodebuild -create-xcframework $(foreach fmwk,$(FMWK_NAMES),-framework $(DIST_DIR)/$(fmwk)/memory.framework) -output $(DIST_DIR)/$(2).xcframework
 	rm -rf $(foreach fmwk,$(FMWK_NAMES),$(DIST_DIR)/$(fmwk))
 endef
 
 .PHONY: xcframework
 xcframework:
-	@# Build remote variant (no llama.cpp)
-	$(MAKE) -j1 distclean && $(MAKE) PLATFORM=ios OMIT_LOCAL_ENGINE=1 && \
+	@# Build remote variant (no llama.cpp) - use rm -rf build to preserve dist between builds
+	MAKEFLAGS= $(MAKE) distclean && MAKEFLAGS= $(MAKE) PLATFORM=ios OMIT_LOCAL_ENGINE=1 && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_remote.dylib && \
-		$(MAKE) -j1 clean && $(MAKE) PLATFORM=ios-sim OMIT_LOCAL_ENGINE=1 && \
+		rm -rf $(BUILD_DIR) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim OMIT_LOCAL_ENGINE=1 && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_remote.dylib && \
-		$(MAKE) -j1 clean && $(MAKE) PLATFORM=macos OMIT_LOCAL_ENGINE=1 && \
+		rm -rf $(BUILD_DIR) && MAKEFLAGS= $(MAKE) PLATFORM=macos OMIT_LOCAL_ENGINE=1 && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_remote.dylib
 	$(call create_xcframework,_remote,memory-remote)
-	@# Build local variant (llama.cpp only)
-	$(MAKE) -j1 distclean && $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+	@# Build local variant (llama.cpp only) - need distclean between platforms to rebuild llama.cpp
+	rm -rf $(DIST_DIR) && MAKEFLAGS= $(MAKE) distclean && MAKEFLAGS= $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_local.dylib && \
-		$(MAKE) -j1 clean && $(MAKE) PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_local.dylib && \
-		$(MAKE) -j1 clean && $(MAKE) PLATFORM=macos OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=macos OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_local.dylib
 	$(call create_xcframework,_local,memory-local)
-	@# Build full variant (both)
-	$(MAKE) -j1 distclean && $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA) && \
+	@# Build full variant (both) - need distclean between platforms to rebuild llama.cpp
+	rm -rf $(DIST_DIR) && MAKEFLAGS= $(MAKE) distclean && MAKEFLAGS= $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_full.dylib && \
-		$(MAKE) -j1 clean && $(MAKE) PLATFORM=ios-sim $(XCFRAMEWORK_LLAMA) && \
+		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_full.dylib && \
-		$(MAKE) -j1 clean && $(MAKE) PLATFORM=macos $(XCFRAMEWORK_LLAMA) && \
+		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=macos $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_full.dylib
 	$(call create_xcframework,_full,memory-full)
 
