@@ -1,0 +1,563 @@
+name: Build, Test and Release
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container && matrix.container || '' }}
+    name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }} build${{ matrix.skip_test != true && ( matrix.name != 'android' || matrix.arch == 'x86_64' ) && ' + test' || ''}}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ============ Linux x86_64 ============
+          # Makefile defaults to CPU-only (AVX2) on Linux x86_64
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux
+            variant: remote
+            make: OMIT_LOCAL_ENGINE=1
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux
+            variant: local
+            make: OMIT_REMOTE_ENGINE=1
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux
+            variant: full
+
+          # ============ Linux arm64 ============
+          # Makefile defaults to CPU-only (armv8.2-a) on Linux arm64
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux
+            variant: remote
+            make: OMIT_LOCAL_ENGINE=1
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux
+            variant: local
+            make: OMIT_REMOTE_ENGINE=1
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux
+            variant: full
+
+          # ============ Linux musl x86_64 ============
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-musl
+            variant: remote
+            container: alpine:latest
+            make: OMIT_LOCAL_ENGINE=1
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-musl
+            variant: local
+            container: alpine:latest
+            make: OMIT_REMOTE_ENGINE=1
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: linux-musl
+            variant: full
+            container: alpine:latest
+
+          # ============ Linux musl arm64 ============
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-musl
+            variant: remote
+            make: OMIT_LOCAL_ENGINE=1
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-musl
+            variant: local
+            make: OMIT_REMOTE_ENGINE=1
+          - os: ubuntu-22.04-arm
+            arch: arm64
+            name: linux-musl
+            variant: full
+
+          # ============ macOS (universal) ============
+          # Makefile defaults to Metal + Accelerate + BLAS on macOS
+          - os: macos-15
+            name: macos
+            variant: remote
+            make: OMIT_LOCAL_ENGINE=1
+          - os: macos-15
+            name: macos
+            variant: local
+            make: OMIT_REMOTE_ENGINE=1
+          - os: macos-15
+            name: macos
+            variant: full
+
+          # ============ macOS x86_64 ============
+          - os: macos-15
+            arch: x86_64
+            name: macos
+            variant: remote
+            make: ARCH=x86_64 OMIT_LOCAL_ENGINE=1
+            skip_test: true
+          - os: macos-15
+            arch: x86_64
+            name: macos
+            variant: local
+            make: ARCH=x86_64 OMIT_REMOTE_ENGINE=1
+            skip_test: true
+          - os: macos-15
+            arch: x86_64
+            name: macos
+            variant: full
+            make: ARCH=x86_64
+            skip_test: true
+
+          # ============ macOS arm64 ============
+          - os: macos-15
+            arch: arm64
+            name: macos
+            variant: remote
+            make: ARCH=arm64 OMIT_LOCAL_ENGINE=1
+          - os: macos-15
+            arch: arm64
+            name: macos
+            variant: local
+            make: ARCH=arm64 OMIT_REMOTE_ENGINE=1
+          - os: macos-15
+            arch: arm64
+            name: macos
+            variant: full
+            make: ARCH=arm64
+
+          # ============ Windows x86_64 ============
+          # Makefile defaults to CPU-only (AVX2) on Windows
+          - os: windows-2022
+            arch: x86_64
+            name: windows
+            variant: remote
+            make: OMIT_LOCAL_ENGINE=1
+          - os: windows-2022
+            arch: x86_64
+            name: windows
+            variant: local
+            make: OMIT_REMOTE_ENGINE=1
+          - os: windows-2022
+            arch: x86_64
+            name: windows
+            variant: full
+
+          # ============ Android arm64-v8a ============
+          # Makefile defaults to CPU-only on Android
+          - os: ubuntu-22.04
+            arch: arm64-v8a
+            name: android
+            variant: remote
+            make: PLATFORM=android ARCH=arm64-v8a OMIT_LOCAL_ENGINE=1
+            skip_test: true
+          - os: ubuntu-22.04
+            arch: arm64-v8a
+            name: android
+            variant: local
+            make: PLATFORM=android ARCH=arm64-v8a OMIT_REMOTE_ENGINE=1
+            skip_test: true
+          - os: ubuntu-22.04
+            arch: arm64-v8a
+            name: android
+            variant: full
+            make: PLATFORM=android ARCH=arm64-v8a
+            skip_test: true
+
+          # ============ Android armeabi-v7a (remote only - llama.cpp not well supported) ============
+          - os: ubuntu-22.04
+            arch: armeabi-v7a
+            name: android
+            variant: remote
+            make: PLATFORM=android ARCH=armeabi-v7a OMIT_LOCAL_ENGINE=1
+            skip_test: true
+
+          # ============ Android x86_64 ============
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: android
+            variant: remote
+            make: PLATFORM=android ARCH=x86_64 OMIT_LOCAL_ENGINE=1
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: android
+            variant: local
+            make: PLATFORM=android ARCH=x86_64 OMIT_REMOTE_ENGINE=1
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+          - os: ubuntu-22.04
+            arch: x86_64
+            name: android
+            variant: full
+            make: PLATFORM=android ARCH=x86_64
+            sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
+
+          # ============ iOS ============
+          # Makefile defaults to Metal + Accelerate + BLAS on iOS
+          - os: macos-15
+            name: ios
+            variant: remote
+            make: PLATFORM=ios OMIT_LOCAL_ENGINE=1
+            skip_test: true
+          - os: macos-15
+            name: ios
+            variant: local
+            make: PLATFORM=ios OMIT_REMOTE_ENGINE=1
+            skip_test: true
+          - os: macos-15
+            name: ios
+            variant: full
+            make: PLATFORM=ios
+            skip_test: true
+
+          # ============ iOS Simulator ============
+          # Makefile defaults to Metal + Accelerate + BLAS on iOS Simulator
+          - os: macos-15
+            name: ios-sim
+            variant: remote
+            make: PLATFORM=ios-sim OMIT_LOCAL_ENGINE=1
+            skip_test: true
+          - os: macos-15
+            name: ios-sim
+            variant: local
+            make: PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1
+            skip_test: true
+          - os: macos-15
+            name: ios-sim
+            variant: full
+            make: PLATFORM=ios-sim
+            skip_test: true
+
+          # ============ Apple XCFramework (all 3 variants) ============
+          - os: macos-15
+            name: apple-xcframework
+            make: xcframework
+            skip_test: true
+
+          # ============ Android AAR (all 3 variants) ============
+          - os: ubuntu-22.04
+            name: android-aar
+            make: aar
+            skip_test: true
+
+    defaults:
+      run:
+        shell: ${{ matrix.container && 'sh' || 'bash' }}
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+        with:
+          submodules: ${{ contains(matrix.make, 'LLAMA=') && 'true' || 'false' }}
+
+      - name: windows install sqlite (remote builds)
+        if: matrix.name == 'windows' && matrix.variant == 'remote'
+        run: choco install sqlite -y
+
+      - uses: msys2/setup-msys2@v2.27.0
+        if: matrix.name == 'windows' && matrix.variant != 'remote'
+        with:
+          msystem: mingw64
+          install: >-
+            git
+            make
+            sqlite
+            mingw-w64-x86_64-cc
+            mingw-w64-x86_64-cmake
+
+      - name: macos install dependencies
+        if: matrix.name == 'macos'
+        run: brew link sqlite --force
+
+      - name: linux-musl x86_64 install dependencies
+        if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64'
+        run: apk update && apk add --no-cache gcc g++ make cmake sqlite musl-dev linux-headers
+
+      - name: linux-musl arm64 setup container
+        if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
+        run: |
+          docker run -d --name alpine \
+            --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            alpine:latest \
+            tail -f /dev/null
+          docker exec alpine sh -c "apk update && apk add --no-cache gcc g++ make cmake sqlite musl-dev linux-headers"
+
+      - name: android-aar setup java
+        if: matrix.name == 'android-aar'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: unix build sqlite-memory
+        if: matrix.os != 'windows-2022' && matrix.name != 'apple-xcframework' && matrix.name != 'android-aar'
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make extension ${{ matrix.make && matrix.make || ''}}
+
+      - name: build apple-xcframework
+        if: matrix.name == 'apple-xcframework'
+        run: make ${{ matrix.make }}
+
+      - name: build android-aar
+        if: matrix.name == 'android-aar'
+        run: make ${{ matrix.make }}
+
+      - name: windows build sqlite-memory (remote)
+        if: matrix.name == 'windows' && matrix.variant == 'remote'
+        run: make extension ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows build sqlite-memory (llama.cpp)
+        if: matrix.name == 'windows' && matrix.variant != 'remote'
+        shell: msys2 {0}
+        run: make extension ${{ matrix.make && matrix.make || ''}}
+
+      - name: create keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
+          echo "${{ secrets.APPLE_CERTIFICATE }}" | base64 --decode > certificate.p12
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+          security import certificate.p12 -k build.keychain -P "${{ secrets.CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD }}" build.keychain
+
+      - name: codesign and notarize dylib
+        if: matrix.os == 'macos-15' && matrix.name != 'apple-xcframework'
+        run: |
+          codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/memory.dylib
+          ditto -c -k dist/memory.dylib dist/memory.zip
+          xcrun notarytool submit dist/memory.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+          rm dist/memory.zip
+
+      - name: codesign and notarize xcframeworks
+        if: matrix.name == 'apple-xcframework'
+        run: |
+          for variant in remote local full; do
+            echo "Signing memory-${variant}.xcframework..."
+            find dist/memory-${variant}.xcframework -name "*.framework" -exec echo "Signing: {}" \; -exec codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime {} \;
+            codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/memory-${variant}.xcframework
+            ditto -c -k --keepParent dist/memory-${variant}.xcframework dist/memory-${variant}.xcframework.zip
+            xcrun notarytool submit dist/memory-${variant}.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
+            rm dist/memory-${variant}.xcframework.zip
+          done
+
+      - name: cleanup keychain for codesign
+        if: matrix.os == 'macos-15'
+        run: |
+          rm certificate.p12
+          security delete-keychain build.keychain
+
+      - name: android setup test environment
+        if: matrix.name == 'android' && matrix.arch == 'x86_64'
+        run: |
+
+          echo "::group::enable kvm group perms"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo "::endgroup::"
+
+          echo "::group::download and build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
+          curl -O ${{ matrix.sqlite-amalgamation-zip }}
+          unzip sqlite-amalgamation-*.zip
+          export ${{ matrix.make }}
+          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
+          # remove unused folders to save up space
+          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
+          echo "::endgroup::"
+
+          echo "::group::prepare the test script"
+          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
+          cat > commands.sh << EOF
+            mv -f /data/local/tmp/sqlite3 /system/xbin
+            cd /data/local/tmp
+            $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
+          EOF
+          echo "::endgroup::"
+
+      - name: android test sqlite-memory
+        if: matrix.name == 'android' && matrix.arch == 'x86_64'
+        uses: reactivecircus/android-emulator-runner@v2.34.0
+        with:
+          api-level: 26
+          arch: ${{ matrix.arch }}
+          script: |
+            adb root
+            adb remount
+            adb push ${{ github.workspace }}/commands.sh /data/local/tmp/
+            adb push ${{ github.workspace }}/sqlite3 /data/local/tmp/
+            adb push ${{ github.workspace }}/dist /data/local/tmp/
+            adb push ${{ github.workspace }}/Makefile /data/local/tmp/
+            adb shell "sh /data/local/tmp/commands.sh"
+
+      - name: unix test sqlite-memory
+        if: matrix.skip_test != true && matrix.os != 'windows-2022' && matrix.name != 'android'
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows test sqlite-memory (remote)
+        if: matrix.skip_test != true && matrix.name == 'windows' && matrix.variant == 'remote'
+        run: make test ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows test sqlite-memory (llama.cpp)
+        if: matrix.skip_test != true && matrix.name == 'windows' && matrix.variant != 'remote'
+        shell: msys2 {0}
+        run: make test ${{ matrix.make && matrix.make || ''}}
+
+      - uses: actions/upload-artifact@v4.6.2
+        if: always()
+        with:
+          name: memory-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
+          path: |
+            dist/memory.*
+            dist/memory-*.xcframework
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-22.04
+    name: release
+    needs: build
+    if: github.ref == 'refs/heads/main'
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+
+      - uses: actions/checkout@v4.2.2
+
+      - uses: actions/download-artifact@v4.2.1
+        with:
+          path: artifacts
+
+      - name: zip artifacts
+        run: |
+          VERSION=$(make version)
+          for folder in "artifacts"/*; do
+            if [ -d "$folder" ]; then
+              name=$(basename "$folder")
+              if [[ "$name" == "memory-apple-xcframework" ]]; then
+                # XCFramework has 3 variants: memory-remote, memory-local, memory-full
+                for variant in remote local full; do
+                  (cd "$folder" && zip -rq "../../memory-apple-xcframework-${variant}-${VERSION}.zip" memory-${variant}.xcframework)
+                done
+              elif [[ "$name" == "memory-android-aar" ]]; then
+                # AAR has all variants bundled in one file
+                cp "$folder"/*.aar "${name}-${VERSION}.aar"
+              else
+                tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
+                (cd "$folder" && zip -rq "../../${name}-${VERSION}.zip" .)
+              fi
+            fi
+          done
+
+      - name: release tag version from sqlite-memory.h
+        id: tag
+        run: |
+          VERSION=$(make version)
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest)
+            LATEST=$(echo "$LATEST_RELEASE" | jq -r '.name')
+
+            # Check artifact sizes against previous release
+            if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
+              echo "Checking artifact sizes against previous release: $LATEST"
+              FAILED=0
+
+              for artifact in memory-*-${VERSION}.*; do
+                if [ ! -f "$artifact" ]; then
+                  continue
+                fi
+
+                # Get current artifact size
+                NEW_SIZE=$(stat -c%s "$artifact" 2>/dev/null || stat -f%z "$artifact")
+
+                # Get artifact name for previous release
+                ARTIFACT_NAME=$(echo "$artifact" | sed "s/${VERSION}/${LATEST}/")
+
+                # Get previous artifact size from GitHub API
+                OLD_SIZE=$(echo "$LATEST_RELEASE" | jq -r ".assets[] | select(.name == \"$(basename "$ARTIFACT_NAME")\") | .size")
+
+                if [ -z "$OLD_SIZE" ] || [ "$OLD_SIZE" = "null" ]; then
+                  echo "⚠️  Previous artifact not found: $(basename "$ARTIFACT_NAME"), skipping comparison"
+                  continue
+                fi
+
+                # Calculate percentage increase
+                INCREASE=$(awk "BEGIN {printf \"%.2f\", (($NEW_SIZE - $OLD_SIZE) / $OLD_SIZE) * 100}")
+
+                echo "📦 $artifact: $OLD_SIZE → $NEW_SIZE bytes (${INCREASE}% change)"
+
+                # Check if increase is more than 5%
+                if (( $(echo "$INCREASE > 5" | bc -l) )); then
+                  if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                    echo "⚠️  WARNING: $artifact size increased by ${INCREASE}% (limit: 5%)"
+                  else
+                    echo "❌ ERROR: $artifact size increased by ${INCREASE}% (limit: 5%)"
+                    FAILED=1
+                  fi
+                fi
+              done
+
+              if [ $FAILED -eq 1 ]; then
+                echo ""
+                echo "❌ One or more artifacts exceeded the 5% size increase limit"
+                exit 1
+              fi
+
+              echo "✅ All artifacts within 5% size increase limit"
+            fi
+
+            if [[ "$VERSION" != "$LATEST" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "version=$VERSION" >> $GITHUB_OUTPUT
+            else
+              echo "::warning file=src/sqlite-memory.h::To release a new version, please update the SQLITE_DBMEMORY_VERSION in src/sqlite-memory.h to be different than the latest $LATEST"
+            fi
+            exit 0
+          fi
+          echo "❌ SQLITE_DBMEMORY_VERSION not found in sqlite-memory.h"
+          exit 1
+
+      - uses: softprops/action-gh-release@v2.2.1
+        if: steps.tag.outputs.version != ''
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            # sqlite-memory v${{ steps.tag.outputs.version }}
+
+            ## Packages
+
+            - **Apple XCFramework** (iOS + iOS Simulator + macOS):
+              - `memory-apple-xcframework-remote` - Remote embeddings only
+              - `memory-apple-xcframework-local` - Local embeddings (llama.cpp + Metal GPU)
+              - `memory-apple-xcframework-full` - Both remote and local
+            - **Android AAR** (arm64-v8a + x86_64):
+              - `memory-android-aar` - Contains all 3 variants: `memory_remote.so`, `memory_local.so`, `memory_full.so`
+
+            ## Build Variants
+
+            - **remote**: Remote embeddings only (smallest, requires network)
+            - **local**: Local embeddings only via llama.cpp (no network required)
+            - **full**: Both remote and local embeddings (most flexible)
+
+            ---
+
+          generate_release_notes: true
+          tag_name: ${{ steps.tag.outputs.version }}
+          files: memory-*-${{ steps.tag.outputs.version }}.*
+          make_latest: true
