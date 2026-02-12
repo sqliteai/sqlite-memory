@@ -261,6 +261,10 @@ jobs:
 
     steps:
 
+      - name: linux-musl x86_64 install dependencies
+        if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64' && matrix.container
+        run: apk update && apk add --no-cache gcc g++ make cmake sqlite sqlite-dev musl-dev linux-headers git
+
       - uses: actions/checkout@v4.2.2
         with:
           submodules: ${{ !contains(matrix.make, 'OMIT_LOCAL_ENGINE=1') && 'true' || 'false' }}
@@ -284,10 +288,6 @@ jobs:
         if: matrix.name == 'macos'
         run: brew link sqlite --force
 
-      - name: linux-musl x86_64 install dependencies
-        if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64'
-        run: apk update && apk add --no-cache gcc g++ make cmake sqlite musl-dev linux-headers
-
       - name: linux-musl arm64 setup container
         if: matrix.name == 'linux-musl' && matrix.arch == 'arm64'
         run: |
@@ -297,7 +297,7 @@ jobs:
             -w /workspace \
             alpine:latest \
             tail -f /dev/null
-          docker exec alpine sh -c "apk update && apk add --no-cache gcc g++ make cmake sqlite musl-dev linux-headers"
+          docker exec alpine sh -c "apk update && apk add --no-cache gcc g++ make cmake sqlite sqlite-dev musl-dev linux-headers git"
 
       - name: android-aar setup java
         if: matrix.name == 'android-aar'

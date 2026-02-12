@@ -24,6 +24,13 @@ ARCH     ?= $(shell uname -m)
 ifeq ($(PLATFORM),darwin)
     PLATFORM := macos
 endif
+# Handle MINGW/MSYS detection (Git Bash, MSYS2, etc.)
+ifneq (,$(findstring mingw,$(PLATFORM)))
+    PLATFORM := windows
+endif
+ifneq (,$(findstring msys,$(PLATFORM)))
+    PLATFORM := windows
+endif
 
 # Directories
 SRC_DIR     := src
@@ -93,9 +100,9 @@ else ifeq ($(PLATFORM),windows)
     EXT := dll
     CC := gcc
     CXX := g++
-    LDFLAGS := -shared -static-libgcc
+    LDFLAGS := -shared -static-libgcc -lbcrypt
     OUTPUT_NAME := memory
-    TEST_LDFLAGS := -lsqlite3
+    TEST_LDFLAGS := -lsqlite3 -lbcrypt
 
 else ifeq ($(PLATFORM),android)
     EXT := so
@@ -169,7 +176,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
 
     # Platform-specific llama.cpp settings
     ifeq ($(PLATFORM),macos)
-        LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
         # Add Metal and BLAS libraries for macOS (cmake auto-detects and builds these)
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
@@ -189,9 +196,10 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
             LDFLAGS += -arch arm64 -arch x86_64
         endif
     else ifeq ($(PLATFORM),linux)
-        LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     else ifeq ($(PLATFORM),windows)
-        LLAMA_OPTIONS += -DGGML_OPENMP=OFF
+        # Target Windows 8+ for CreateFile2 support in cpp-httplib
+        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0602"
         LDFLAGS := -shared -lbcrypt -static-libgcc -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
     else ifeq ($(PLATFORM),android)
         # Android NDK cmake toolchain
@@ -199,6 +207,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
             -DANDROID_ABI=$(ARCH) \
             -DANDROID_PLATFORM=android-26 \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DGGML_NATIVE=OFF \
             -DGGML_OPENMP=OFF \
             -DGGML_LLAMAFILE=OFF
         ifeq ($(ARCH),arm64-v8a)
@@ -206,7 +215,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         endif
         LLAMA_OPTIONS += $(ANDROID_OPTIONS)
     else ifeq ($(PLATFORM),ios)
-        LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
         # Add Metal and BLAS libraries for iOS
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
@@ -214,7 +223,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
             -framework Metal -framework Foundation -framework Accelerate -framework CoreFoundation -framework Security \
             -ldl -lpthread -lm -headerpad_max_install_names
     else ifeq ($(PLATFORM),ios-sim)
-        LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
+        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
         # Add Metal and BLAS libraries for iOS simulator
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
@@ -328,12 +337,11 @@ test: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/unittest
 TEST_DEFINES := -DSQLITE_CORE
 
 # Test-specific link flags (includes all frameworks/libs needed for llama.cpp)
+TEST_LINK_EXTRAS :=
 ifeq ($(OMIT_LOCAL_ENGINE),0)
     ifeq ($(PLATFORM),macos)
         TEST_LINK_EXTRAS := -framework Metal -framework Foundation -framework Accelerate -lobjc
     endif
-else
-    TEST_LINK_EXTRAS :=
 endif
 
 # Compile test sources with SQLITE_CORE
@@ -431,17 +439,17 @@ XCFRAMEWORK_LLAMA = LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=O
 # Helper function to create xcframework from 3 dylibs
 # Usage: $(call create_xcframework,variant_suffix,output_name)
 define create_xcframework
-	@$(foreach pair,ios:ios-arm64 ios-sim:ios-arm64_x86_64-simulator macos:macos-arm64_x86_64,\
-		platform=$(word 1,$(subst :, ,$(pair))); \
-		fmwk=$(word 2,$(subst :, ,$(pair))); \
+	@for pair in "ios:ios-arm64" "ios-sim:ios-arm64_x86_64-simulator" "macos:macos-arm64_x86_64"; do \
+		platform=$${pair%%:*}; \
+		fmwk=$${pair##*:}; \
 		mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Headers; \
 		mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Modules; \
 		cp src/sqlite-memory.h $(DIST_DIR)/$$fmwk/memory.framework/Headers; \
 		printf "$(PLIST)" > $(DIST_DIR)/$$fmwk/memory.framework/Info.plist; \
 		printf "$(MODULEMAP)" > $(DIST_DIR)/$$fmwk/memory.framework/Modules/module.modulemap; \
-		mv $(DIST_DIR)/$$platform$(1).dylib $(DIST_DIR)/$$fmwk/memory.framework/memory; \
+		mv $(DIST_DIR)/$${platform}$(1).dylib $(DIST_DIR)/$$fmwk/memory.framework/memory; \
 		install_name_tool -id "@rpath/memory.framework/memory" $(DIST_DIR)/$$fmwk/memory.framework/memory; \
-	)
+	done
 	xcodebuild -create-xcframework $(foreach fmwk,$(FMWK_NAMES),-framework $(DIST_DIR)/$(fmwk)/memory.framework) -output $(DIST_DIR)/$(2).xcframework
 	rm -rf $(foreach fmwk,$(FMWK_NAMES),$(DIST_DIR)/$(fmwk))
 endef
