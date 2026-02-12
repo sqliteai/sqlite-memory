@@ -269,12 +269,8 @@ jobs:
         with:
           submodules: ${{ !contains(matrix.make, 'OMIT_LOCAL_ENGINE=1') && 'true' || 'false' }}
 
-      - name: windows install sqlite
-        if: matrix.name == 'windows'
-        run: choco install sqlite -y
-
       - uses: msys2/setup-msys2@v2.27.0
-        if: matrix.name == 'windows' && matrix.variant != 'remote'
+        if: matrix.name == 'windows'
         with:
           msystem: mingw64
           install: >-
@@ -318,12 +314,8 @@ jobs:
         if: matrix.name == 'android-aar'
         run: make ${{ matrix.make }}
 
-      - name: windows build sqlite-memory (remote)
-        if: matrix.name == 'windows' && matrix.variant == 'remote'
-        run: make extension ${{ matrix.make && matrix.make || ''}}
-
-      - name: windows build sqlite-memory (llama.cpp)
-        if: matrix.name == 'windows' && matrix.variant != 'remote'
+      - name: windows build sqlite-memory
+        if: matrix.name == 'windows'
         shell: msys2 {0}
         run: make extension ${{ matrix.make && matrix.make || ''}}
 
@@ -410,12 +402,8 @@ jobs:
         if: matrix.skip_test != true && matrix.os != 'windows-2022' && matrix.name != 'android'
         run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
 
-      - name: windows test sqlite-memory (remote)
-        if: matrix.skip_test != true && matrix.name == 'windows' && matrix.variant == 'remote'
-        run: make test ${{ matrix.make && matrix.make || ''}}
-
-      - name: windows test sqlite-memory (llama.cpp)
-        if: matrix.skip_test != true && matrix.name == 'windows' && matrix.variant != 'remote'
+      - name: windows test sqlite-memory
+        if: matrix.skip_test != true && matrix.name == 'windows'
         shell: msys2 {0}
         run: make test ${{ matrix.make && matrix.make || ''}}
 

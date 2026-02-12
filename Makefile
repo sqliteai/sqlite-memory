@@ -456,29 +456,29 @@ endef
 
 .PHONY: xcframework
 xcframework:
-	# Build remote variant (no llama.cpp)
-	$(MAKE) distclean && $(MAKE) PLATFORM=ios OMIT_LOCAL_ENGINE=1
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_remote.dylib
-	$(MAKE) clean && $(MAKE) PLATFORM=ios-sim OMIT_LOCAL_ENGINE=1
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_remote.dylib
-	$(MAKE) clean && $(MAKE) PLATFORM=macos OMIT_LOCAL_ENGINE=1
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_remote.dylib
+	@# Build remote variant (no llama.cpp)
+	$(MAKE) -j1 distclean && $(MAKE) PLATFORM=ios OMIT_LOCAL_ENGINE=1 && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_remote.dylib && \
+		$(MAKE) -j1 clean && $(MAKE) PLATFORM=ios-sim OMIT_LOCAL_ENGINE=1 && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_remote.dylib && \
+		$(MAKE) -j1 clean && $(MAKE) PLATFORM=macos OMIT_LOCAL_ENGINE=1 && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_remote.dylib
 	$(call create_xcframework,_remote,memory-remote)
-	# Build local variant (llama.cpp only)
-	$(MAKE) distclean && $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA)
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_local.dylib
-	$(MAKE) clean && $(MAKE) PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA)
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_local.dylib
-	$(MAKE) clean && $(MAKE) PLATFORM=macos OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA)
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_local.dylib
+	@# Build local variant (llama.cpp only)
+	$(MAKE) -j1 distclean && $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_local.dylib && \
+		$(MAKE) -j1 clean && $(MAKE) PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_local.dylib && \
+		$(MAKE) -j1 clean && $(MAKE) PLATFORM=macos OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_local.dylib
 	$(call create_xcframework,_local,memory-local)
-	# Build full variant (both)
-	$(MAKE) distclean && $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA)
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_full.dylib
-	$(MAKE) clean && $(MAKE) PLATFORM=ios-sim $(XCFRAMEWORK_LLAMA)
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_full.dylib
-	$(MAKE) clean && $(MAKE) PLATFORM=macos $(XCFRAMEWORK_LLAMA)
-	mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_full.dylib
+	@# Build full variant (both)
+	$(MAKE) -j1 distclean && $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA) && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_full.dylib && \
+		$(MAKE) -j1 clean && $(MAKE) PLATFORM=ios-sim $(XCFRAMEWORK_LLAMA) && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_full.dylib && \
+		$(MAKE) -j1 clean && $(MAKE) PLATFORM=macos $(XCFRAMEWORK_LLAMA) && \
+		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_full.dylib
 	$(call create_xcframework,_full,memory-full)
 
 # ============ Android AAR ============
