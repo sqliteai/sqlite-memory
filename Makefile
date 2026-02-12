@@ -382,9 +382,13 @@ $(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) | $(DIST_DIR)
 
 # Build and run tests
 .PHONY: test
-test: $(BUILD_DEPS) $(BUILD_DIR)/unittest
-	@echo "Running tests..."
+test: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/unittest
+	@echo "Running unit tests..."
 	@$(BUILD_DIR)/unittest
+	@echo ""
+	@echo "Testing extension loading..."
+	@sqlite3 :memory: ".load $(TARGET)" "SELECT 'memory_version: ' || memory_version();"
+	@echo "Extension loading test passed!"
 
 # Unit test needs SQLITE_CORE to use direct SQLite calls (not extension API)
 TEST_DEFINES := -DSQLITE_CORE

@@ -265,8 +265,8 @@ jobs:
         with:
           submodules: ${{ !contains(matrix.make, 'OMIT_LOCAL_ENGINE=1') && 'true' || 'false' }}
 
-      - name: windows install sqlite (remote builds)
-        if: matrix.name == 'windows' && matrix.variant == 'remote'
+      - name: windows install sqlite
+        if: matrix.name == 'windows'
         run: choco install sqlite -y
 
       - uses: msys2/setup-msys2@v2.27.0
