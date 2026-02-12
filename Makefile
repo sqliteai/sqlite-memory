@@ -170,37 +170,29 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     # Platform-specific llama.cpp settings
     ifeq ($(PLATFORM),macos)
         LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-        # Default macOS build uses Metal + Accelerate + BLAS when LLAMA is empty
-        ifeq ($(LLAMA),)
-            LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple
-        endif
+        # Add Metal and BLAS libraries for macOS (cmake auto-detects and builds these)
+        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
+        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
         ifeq ($(ARCH),x86_64)
             LLAMA_OPTIONS += -DCMAKE_OSX_ARCHITECTURES="x86_64"
-            LDFLAGS += -arch x86_64
         else ifeq ($(ARCH),arm64)
             LLAMA_OPTIONS += -DCMAKE_OSX_ARCHITECTURES="arm64"
-            LDFLAGS += -arch arm64
         else
             LLAMA_OPTIONS += '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
+        endif
+        LDFLAGS := -dynamiclib -framework Metal -framework Foundation -framework Accelerate -framework Security
+        ifeq ($(ARCH),x86_64)
+            LDFLAGS += -arch x86_64
+        else ifeq ($(ARCH),arm64)
+            LDFLAGS += -arch arm64
+        else
             LDFLAGS += -arch arm64 -arch x86_64
         endif
     else ifeq ($(PLATFORM),linux)
         LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        # Default Linux build uses CPU-only when LLAMA is empty
-        ifeq ($(LLAMA),)
-            LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_CPU=ON
-            ifeq ($(ARCH),x86_64)
-                LLAMA_OPTIONS += -DGGML_AVX2=ON
-            else ifeq ($(ARCH),arm64)
-                LLAMA_OPTIONS += -DGGML_CPU_ARM_ARCH=armv8.2-a
-            endif
-        endif
     else ifeq ($(PLATFORM),windows)
         LLAMA_OPTIONS += -DGGML_OPENMP=OFF
-        # Default Windows build uses CPU-only when LLAMA is empty
-        ifeq ($(LLAMA),)
-            LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON
-        endif
+        LDFLAGS := -shared -lbcrypt -static-libgcc -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
     else ifeq ($(PLATFORM),android)
         # Android NDK cmake toolchain
         ANDROID_OPTIONS := -DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
@@ -212,53 +204,26 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         ifeq ($(ARCH),arm64-v8a)
             ANDROID_OPTIONS += -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod
         endif
-        # Default Android build uses CPU-only when LLAMA is empty
-        ifeq ($(LLAMA),)
-            ANDROID_OPTIONS += -DGGML_NATIVE=OFF -DGGML_CPU=ON
-            ifeq ($(ARCH),x86_64)
-                ANDROID_OPTIONS += -DGGML_AVX2=ON
-            endif
-        endif
         LLAMA_OPTIONS += $(ANDROID_OPTIONS)
     else ifeq ($(PLATFORM),ios)
         LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
-        # Default iOS build uses Metal + Accelerate + BLAS when LLAMA is empty
-        ifeq ($(LLAMA),)
-            LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple
-        endif
+        # Add Metal and BLAS libraries for iOS
+        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
+        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+        LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0 \
+            -framework Metal -framework Foundation -framework Accelerate -framework CoreFoundation -framework Security \
+            -ldl -lpthread -lm -headerpad_max_install_names
     else ifeq ($(PLATFORM),ios-sim)
         LLAMA_OPTIONS += -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
-        # Default iOS simulator build uses Metal + Accelerate + BLAS when LLAMA is empty
-        ifeq ($(LLAMA),)
-            LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple
-        endif
+        # Add Metal and BLAS libraries for iOS simulator
+        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
+        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+        LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 \
+            -framework Metal -framework Foundation -framework Accelerate -framework CoreFoundation -framework Security \
+            -ldl -lpthread -lm -headerpad_max_install_names
     endif
 
-    # Backend-specific libraries (detected from LLAMA cmake flags)
-    # On Apple platforms, if LLAMA is empty, use default settings (Metal + Accelerate + BLAS)
-    ifneq (,$(filter $(PLATFORM),macos ios ios-sim))
-        ifeq ($(LLAMA),)
-            # Default Apple build: Metal + Accelerate + BLAS with Apple vendor
-            LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
-            LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
-            FRAMEWORKS += -framework Metal -framework Foundation -framework Accelerate
-        endif
-    endif
-    ifneq (,$(findstring GGML_METAL=ON,$(LLAMA)))
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
-        FRAMEWORKS += -framework Metal -framework Foundation
-    endif
-    ifneq (,$(findstring GGML_ACCELERATE=ON,$(LLAMA)))
-        FRAMEWORKS += -framework Accelerate
-    endif
-    ifneq (,$(findstring GGML_BLAS=ON,$(LLAMA)))
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
-        ifneq (,$(findstring Apple,$(LLAMA)))
-            FRAMEWORKS += -framework Accelerate
-        else
-            LDFLAGS += -lblas
-        endif
-    endif
+    # Backend-specific libraries (detected from LLAMA cmake flags for explicit overrides)
     ifneq (,$(findstring GGML_VULKAN=ON,$(LLAMA)))
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a
         ifeq ($(PLATFORM),windows)
@@ -278,37 +243,6 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     ifneq (,$(findstring GGML_OPENCL=ON,$(LLAMA)))
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a
         LDFLAGS += -lOpenCL
-    endif
-
-    # Update LDFLAGS with frameworks for macOS
-    ifeq ($(PLATFORM),macos)
-        LDFLAGS := -dynamiclib $(FRAMEWORKS)
-        ifeq ($(ARCH),x86_64)
-            LDFLAGS += -arch x86_64
-        else ifeq ($(ARCH),arm64)
-            LDFLAGS += -arch arm64
-        else
-            LDFLAGS += -arch arm64 -arch x86_64
-        endif
-    endif
-
-    # Update LDFLAGS for Windows with llama.cpp
-    ifeq ($(PLATFORM),windows)
-        LDFLAGS := -shared -lbcrypt -static-libgcc -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
-    endif
-
-    # Update LDFLAGS for iOS with llama.cpp (Metal GPU acceleration)
-    ifeq ($(PLATFORM),ios)
-        LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0 \
-            $(FRAMEWORKS) -framework CoreFoundation -framework Security \
-            -ldl -lpthread -lm -headerpad_max_install_names
-    endif
-
-    # Update LDFLAGS for iOS simulator with llama.cpp (Metal GPU acceleration)
-    ifeq ($(PLATFORM),ios-sim)
-        LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 \
-            $(FRAMEWORKS) -framework CoreFoundation -framework Security \
-            -ldl -lpthread -lm -headerpad_max_install_names
     endif
 
     # Use C++ linker when linking with llama.cpp
@@ -393,6 +327,15 @@ test: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/unittest
 # Unit test needs SQLITE_CORE to use direct SQLite calls (not extension API)
 TEST_DEFINES := -DSQLITE_CORE
 
+# Test-specific link flags (includes all frameworks/libs needed for llama.cpp)
+ifeq ($(OMIT_LOCAL_ENGINE),0)
+    ifeq ($(PLATFORM),macos)
+        TEST_LINK_EXTRAS := -framework Metal -framework Foundation -framework Accelerate -lobjc
+    endif
+else
+    TEST_LINK_EXTRAS :=
+endif
+
 # Compile test sources with SQLITE_CORE
 $(BUILD_DIR)/unittest.o: $(TEST_DIR)/unittest.c | $(BUILD_DIR)
 	@echo "Compiling unittest.c..."
@@ -409,7 +352,7 @@ TEST_C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/test-%.o,$(C_SOURCES))
 $(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(LLAMA_LIBS) | $(BUILD_DIR)
 	@echo "Linking unittest..."
 	@$(LINKER) $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(LLAMA_LIBS) \
-		$(TEST_LDFLAGS) $(FRAMEWORKS) \
+		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
 		-o $@
 
 # Build without local engine (remote-only builds)
@@ -535,26 +478,24 @@ xcframework:
 
 AAR_ARM = packages/android/src/main/jniLibs/arm64-v8a/
 AAR_X86 = packages/android/src/main/jniLibs/x86_64/
-AAR_LLAMA_ARM = LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod"
-AAR_LLAMA_X86 = LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON"
 
 .PHONY: aar
 aar:
 	mkdir -p $(AAR_ARM) $(AAR_X86)
 	# Build remote variant (no llama.cpp)
-	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=arm64-v8a OMIT_LOCAL_ENGINE=1
+	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=arm64-v8a OMIT_LOCAL_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_ARM)/memory_remote.so
 	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=x86_64 OMIT_LOCAL_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_X86)/memory_remote.so
 	# Build local variant (llama.cpp only)
-	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=arm64-v8a OMIT_REMOTE_ENGINE=1 $(AAR_LLAMA_ARM)
+	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=arm64-v8a OMIT_REMOTE_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_ARM)/memory_local.so
-	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=x86_64 OMIT_REMOTE_ENGINE=1 $(AAR_LLAMA_X86)
+	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=x86_64 OMIT_REMOTE_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_X86)/memory_local.so
 	# Build full variant (both)
-	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=arm64-v8a $(AAR_LLAMA_ARM)
+	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=arm64-v8a
 	mv $(DIST_DIR)/memory.so $(AAR_ARM)/memory_full.so
-	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=x86_64 $(AAR_LLAMA_X86)
+	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=x86_64
 	mv $(DIST_DIR)/memory.so $(AAR_X86)/memory_full.so
 	# Build AAR
 	cd packages/android && ./gradlew clean assembleRelease
