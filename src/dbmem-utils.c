@@ -156,7 +156,7 @@ uint64_t dbmem_hash_compute (const void *data, size_t len) {
 int dbmem_compute_uuid_v7 (uint8_t value[DBMEM_UUID_LEN]) {
     // fill the buffer with high-quality random data
     #ifdef _WIN32
-    if (BCryptGenRandom(NULL, (BYTE*)value, DBMEM_UUID_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != STATUS_SUCCESS) return -1;
+    if (BCryptGenRandom(NULL, (BYTE*)value, DBMEM_UUID_LEN, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return -1;
     #elif defined(__APPLE__)
     // Use SecRandomCopyBytes for macOS/iOS
     if (SecRandomCopyBytes(kSecRandomDefault, DBMEM_UUID_LEN, value) != errSecSuccess) return -1;
