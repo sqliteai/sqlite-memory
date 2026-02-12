@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #include "dbmem-utils.h"
@@ -167,10 +169,11 @@ int dbmem_compute_uuid_v7 (uint8_t value[DBMEM_UUID_LEN]) {
     
     // get current timestamp in ms
     struct timespec ts;
-    #ifdef __ANDROID__
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
-    #else
+    #if defined(__APPLE__)
     if (timespec_get(&ts, TIME_UTC) == 0) return -1;
+    #else
+    // Use clock_gettime for Linux/Android/Windows (timespec_get not available on older glibc)
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return -1;
     #endif
     
     // add timestamp part to UUID
