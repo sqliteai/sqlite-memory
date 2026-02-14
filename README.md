@@ -36,6 +36,7 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 - **Intelligent Sync**: Content-hash change detection — unchanged files are skipped, modified files are atomically replaced, deleted files are cleaned up
 - **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction — either fully succeeds or fully rolls back, no partially-indexed content
 - **Efficient Storage**: Binary embeddings with configurable dimensions
+- **Embedding Cache**: Automatically caches computed embeddings so re-indexing the same text skips redundant API calls and computation
 - **Flexible Embedding**: Use local models (llama.cpp) or [vectors.space](https://vectors.space) remote API
 
 ## Architecture
