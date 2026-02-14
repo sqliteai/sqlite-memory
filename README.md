@@ -33,8 +33,8 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 
 - **Hybrid Search**: Combines vector similarity (cosine distance) with FTS5 full-text search for superior retrieval
 - **Smart Chunking**: Markdown-aware parsing preserves semantic boundaries
-- **Intelligent Sync**: Content-hash change detection — unchanged files are skipped, modified files are atomically replaced, deleted files are cleaned up
-- **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction — either fully succeeds or fully rolls back, no partially-indexed content
+- **Intelligent Sync**: Content-hash change detection, unchanged files are skipped, modified files are atomically replaced, deleted files are cleaned up
+- **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction, either fully succeeds or fully rolls back, no partially-indexed content
 - **Efficient Storage**: Binary embeddings with configurable dimensions
 - **Flexible Embedding**: Use local models (llama.cpp) or [vectors.space](https://vectors.space) remote API
 
