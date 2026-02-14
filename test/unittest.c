@@ -2049,6 +2049,128 @@ TEST(sqlite_cache_setting_default) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_cache_max_entries_setting) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Default is 0 (no limit)
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 100);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('cache_max_entries');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 100);
+
+    // Set back to 0 (no limit)
+    rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('cache_max_entries');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_eviction) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Set max entries to 3
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 3);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Insert 5 entries (rowids 1-5)
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(1, 'p', 'm', X'00000000', 1), "
+        "(2, 'p', 'm', X'00000000', 1), "
+        "(3, 'p', 'm', X'00000000', 1), "
+        "(4, 'p', 'm', X'00000000', 1), "
+        "(5, 'p', 'm', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify 5 entries before any sync triggers eviction
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 5);
+
+    // Now manually call memory_cache_clear to clear all, then re-insert within limit
+    rc = exec_get_int(db, "SELECT memory_cache_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Insert exactly 3 (at limit)
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(10, 'p', 'm', X'00000000', 1), "
+        "(11, 'p', 'm', X'00000000', 1), "
+        "(12, 'p', 'm', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 3);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_no_eviction_when_unlimited) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Default cache_max_entries is 0 (no limit)
+    // Insert many entries, none should be evicted
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(1, 'p', 'm', X'00000000', 1), "
+        "(2, 'p', 'm', X'00000000', 1), "
+        "(3, 'p', 'm', X'00000000', 1), "
+        "(4, 'p', 'm', X'00000000', 1), "
+        "(5, 'p', 'm', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 5);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_search_oversample_setting) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Default is 0 (no oversampling)
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('search_oversample', 4);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('search_oversample');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 4);
+
+    // Set back to 0 (no oversampling)
+    rc = exec_get_int(db, "SELECT memory_set_option('search_oversample', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('search_oversample');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_delete_context_with_vault) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -2212,6 +2334,12 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_cache_clear_with_data);
     RUN_TEST(sqlite_cache_clear_by_provider_model);
     RUN_TEST(sqlite_cache_setting_default);
+    RUN_TEST(sqlite_cache_max_entries_setting);
+    RUN_TEST(sqlite_cache_eviction);
+    RUN_TEST(sqlite_cache_no_eviction_when_unlimited);
+
+    printf("\nSearch oversampling tests:\n");
+    RUN_TEST(sqlite_search_oversample_setting);
 #endif
 
     printf("\n=== Results ===\n");

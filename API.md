@@ -465,6 +465,8 @@ AND context = 'meetings';
 | `min_score` | REAL | 0.7 | Minimum score threshold for results |
 | `update_access` | INTEGER | 1 | Update last_accessed on search |
 | `embedding_cache` | INTEGER | 1 | Cache embeddings to avoid redundant computation |
+| `cache_max_entries` | INTEGER | 0 | Max cache entries (0 = no limit). When exceeded, oldest entries are evicted |
+| `search_oversample` | INTEGER | 0 | Search oversampling multiplier (0 = no oversampling). When set, retrieves N * multiplier candidates from each index before merging down to N final results |
 
 ---
 

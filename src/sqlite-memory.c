@@ -57,6 +57,8 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_MIN_SCORE            "min_score"
 #define DBMEM_SETTINGS_KEY_UPDATE_ACCESS        "update_access"
 #define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE     "embedding_cache"
+#define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES   "cache_max_entries"
+#define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE  "search_oversample"
 
 // default values from https://docs.openclaw.ai/concepts/memory
 #define DEFAULT_CHARS_PER_TOKEN                 4       // Approximate number of characters per token (GPT ≈ 4, Claude ≈ 3.5)
@@ -106,6 +108,8 @@ struct dbmem_context {
     double      min_score;                      // Minimum score threshold to filter irrelevant results
     bool        update_access;                  // Whether to update last_accessed on search
     bool        embedding_cache;                // Enable/disable embedding cache (default: true)
+    int         cache_max_entries;              // Max cache entries (0 = no limit)
+    int         search_oversample;             // Search oversampling multiplier (0 = no oversampling)
 
     // Cache
     float       *cache_buffer;                  // Reusable buffer for cache hits
@@ -251,6 +255,18 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_EMBEDDING_CACHE) == 0) {
         int n = sqlite3_value_int(value);
         ctx->embedding_cache = (n > 0) ? 1 : 0;
+        return 0;
+    }
+
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES) == 0) {
+        int n = sqlite3_value_int(value);
+        if (n >= 0) ctx->cache_max_entries = n;
+        return 0;
+    }
+
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE) == 0) {
+        int n = sqlite3_value_int(value);
+        if (n >= 0) ctx->search_oversample = n;
         return 0;
     }
 
@@ -642,6 +658,10 @@ double dbmem_context_min_score (dbmem_context *ctx) {
 
 bool dbmem_context_update_access (dbmem_context *ctx) {
     return ctx->update_access;
+}
+
+int dbmem_context_search_oversample (dbmem_context *ctx) {
+    return ctx->search_oversample;
 }
 
 const char *dbmem_context_errmsg (dbmem_context *ctx) {
@@ -1071,6 +1091,33 @@ cleanup:
     return found;
 }
 
+static void dbmem_cache_evict (dbmem_context *ctx) {
+    static const char *sql = "DELETE FROM dbmem_cache WHERE rowid IN (SELECT rowid FROM dbmem_cache ORDER BY rowid ASC LIMIT ?1);";
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    // count current entries
+    sqlite3_stmt *count_vm = NULL;
+    rc = sqlite3_prepare_v2(ctx->db, "SELECT COUNT(*) FROM dbmem_cache;", -1, &count_vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(count_vm);
+    if (rc != SQLITE_ROW) { sqlite3_finalize(count_vm); goto cleanup; }
+    int count = sqlite3_column_int(count_vm, 0);
+    sqlite3_finalize(count_vm);
+
+    int excess = count - ctx->cache_max_entries;
+    if (excess <= 0) goto cleanup;
+
+    sqlite3_bind_int(vm, 1, excess);
+    sqlite3_step(vm);
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+}
+
 static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const embedding_result_t *result) {
     static const char *sql = "INSERT OR REPLACE INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES (?1, ?2, ?3, ?4, ?5);";
 
@@ -1090,6 +1137,11 @@ static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const emb
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
+
+    // evict oldest entries if limit is set and exceeded
+    if (ctx->cache_max_entries > 0) {
+        dbmem_cache_evict(ctx);
+    }
 }
 
 // MARK: -

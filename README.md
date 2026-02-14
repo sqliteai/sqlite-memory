@@ -182,12 +182,14 @@ SELECT memory_set_option('max_results', 30);      -- Max search results
 SELECT memory_set_option('min_score', 0.75);      -- Score threshold
 SELECT memory_set_option('vector_weight', 0.6);   -- Vector vs FTS balance
 SELECT memory_set_option('text_weight', 0.4);
+SELECT memory_set_option('search_oversample', 4); -- Fetch 4x candidates before merging
 
 -- File processing
 SELECT memory_set_option('extensions', 'md,txt,rst');  -- File types to index
 
 -- Embedding cache (enabled by default)
 SELECT memory_set_option('embedding_cache', 0);        -- Disable cache
+SELECT memory_set_option('cache_max_entries', 10000);  -- Limit cache size (0 = no limit)
 SELECT memory_cache_clear();                           -- Clear cached embeddings
 ```
 
