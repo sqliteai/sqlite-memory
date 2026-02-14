@@ -56,6 +56,7 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_TEXT_WEIGHT          "text_weight"
 #define DBMEM_SETTINGS_KEY_MIN_SCORE            "min_score"
 #define DBMEM_SETTINGS_KEY_UPDATE_ACCESS        "update_access"
+#define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE     "embedding_cache"
 
 // default values from https://docs.openclaw.ai/concepts/memory
 #define DEFAULT_CHARS_PER_TOKEN                 4       // Approximate number of characters per token (GPT ≈ 4, Claude ≈ 3.5)
@@ -104,7 +105,12 @@ struct dbmem_context {
     double      text_weight;                    // Weight of the FTS results during the merge of the result
     double      min_score;                      // Minimum score threshold to filter irrelevant results
     bool        update_access;                  // Whether to update last_accessed on search
-    
+    bool        embedding_cache;                // Enable/disable embedding cache (default: true)
+
+    // Cache
+    float       *cache_buffer;                  // Reusable buffer for cache hits
+    int         cache_buffer_size;              // Allocated size in floats
+
     // Runtime state
     int64_t     counter;                        // Chunk counter during file processing
     uint64_t    hash;                           // Hash of the current text
@@ -242,6 +248,12 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
         return 0;
     }
 
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_EMBEDDING_CACHE) == 0) {
+        int n = sqlite3_value_int(value);
+        ctx->embedding_cache = (n > 0) ? 1 : 0;
+        return 0;
+    }
+
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_PROVIDER) == 0) {
         char *provider = dbmem_strdup((const char *)sqlite3_value_text(value));
         if (provider) {
@@ -308,6 +320,10 @@ static int dbmem_database_init (sqlite3 *db) {
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
     sql = "CREATE VIRTUAL TABLE IF NOT EXISTS dbmem_vault_fts USING fts5 (content, hash UNINDEXED, seq UNINDEXED, context UNINDEXED);";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
@@ -514,6 +530,7 @@ static void *dbmem_context_create (sqlite3 *db) {
     ctx->text_weight = DEFAULT_TEXT_WEIGHT;
     ctx->min_score = DEFAULT_MIN_SCORE;
     ctx->update_access = true;
+    ctx->embedding_cache = true;
 
     return (void *)ctx;
 }
@@ -526,6 +543,7 @@ static void dbmem_context_free (void *ptr) {
     if (ctx->model) dbmem_free(ctx->model);
     if (ctx->api_key) dbmem_free(ctx->api_key);
     if (ctx->extensions) dbmem_free(ctx->extensions);
+    if (ctx->cache_buffer) dbmem_free(ctx->cache_buffer);
 
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
     if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
@@ -776,6 +794,44 @@ rollback:
     sqlite3_result_error(context, sqlite3_errmsg(db), -1);
 }
 
+// MARK: - Cache Clear -
+
+static void dbmem_cache_clear (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    int rc;
+
+    if (argc == 0) {
+        rc = sqlite3_exec(db, "DELETE FROM dbmem_cache;", NULL, NULL, NULL);
+    } else if (argc == 2) {
+        if (sqlite3_value_type(argv[0]) != SQLITE_TEXT || sqlite3_value_type(argv[1]) != SQLITE_TEXT) {
+            sqlite3_result_error(context, "The function memory_cache_clear expects two arguments of type TEXT (provider, model)", SQLITE_ERROR);
+            return;
+        }
+        const char *provider = (const char *)sqlite3_value_text(argv[0]);
+        const char *model = (const char *)sqlite3_value_text(argv[1]);
+
+        sqlite3_stmt *vm = NULL;
+        rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_cache WHERE provider=?1 AND model=?2;", -1, &vm, NULL);
+        if (rc == SQLITE_OK) {
+            sqlite3_bind_text(vm, 1, provider, -1, SQLITE_STATIC);
+            sqlite3_bind_text(vm, 2, model, -1, SQLITE_STATIC);
+            rc = sqlite3_step(vm);
+            if (rc == SQLITE_DONE) rc = SQLITE_OK;
+        }
+        if (vm) sqlite3_finalize(vm);
+    } else {
+        sqlite3_result_error(context, "The function memory_cache_clear expects 0 or 2 arguments", SQLITE_ERROR);
+        return;
+    }
+
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    sqlite3_result_int(context, sqlite3_changes(db));
+}
+
 // MARK: - General -
 
 static void dbmem_version (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -970,40 +1026,123 @@ static void dbmem_dump_embeding (const embedding_result_t *result) {
 }
 #endif
 
+// MARK: - Embedding Cache -
+
+static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embedding_result_t *result) {
+    static const char *sql = "SELECT embedding, dimension FROM dbmem_cache WHERE text_hash=?1 AND provider=?2 AND model=?3 LIMIT 1;";
+
+    if (!ctx->provider || !ctx->model) return false;
+
+    bool found = false;
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    sqlite3_bind_int64(vm, 1, (sqlite3_int64)text_hash);
+    sqlite3_bind_text(vm, 2, ctx->provider, -1, SQLITE_STATIC);
+    sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
+
+    rc = sqlite3_step(vm);
+    if (rc != SQLITE_ROW) goto cleanup;
+
+    int dimension = sqlite3_column_int(vm, 1);
+    int blob_bytes = sqlite3_column_bytes(vm, 0);
+    const void *blob = sqlite3_column_blob(vm, 0);
+
+    if (blob_bytes != dimension * (int)sizeof(float)) goto cleanup;
+
+    // ensure cache_buffer is large enough
+    if (ctx->cache_buffer_size < dimension) {
+        float *new_buf = (float *)dbmem_realloc(ctx->cache_buffer, dimension * sizeof(float));
+        if (!new_buf) goto cleanup;
+        ctx->cache_buffer = new_buf;
+        ctx->cache_buffer_size = dimension;
+    }
+
+    memcpy(ctx->cache_buffer, blob, blob_bytes);
+    result->embedding = ctx->cache_buffer;
+    result->n_embd = dimension;
+    result->n_tokens = 0;
+    result->n_tokens_truncated = 0;
+    found = true;
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return found;
+}
+
+static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const embedding_result_t *result) {
+    static const char *sql = "INSERT OR REPLACE INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES (?1, ?2, ?3, ?4, ?5);";
+
+    if (!ctx->provider || !ctx->model) return;
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    sqlite3_bind_int64(vm, 1, (sqlite3_int64)text_hash);
+    sqlite3_bind_text(vm, 2, ctx->provider, -1, SQLITE_STATIC);
+    sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(vm, 4, result->embedding, result->n_embd * (int)sizeof(float), SQLITE_STATIC);
+    sqlite3_bind_int(vm, 5, result->n_embd);
+
+    sqlite3_step(vm);
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+}
+
+// MARK: -
+
 static int dbmem_process_callback (const char *text, size_t len, size_t offset, size_t length, void *xdata, size_t index) {
     dbmem_context *ctx = (dbmem_context *)xdata;
     embedding_result_t result = {0};
     int rc = SQLITE_OK;
-        
-    // compute embedding
-    if (ctx->is_local) {
-    #ifndef DBMEM_OMIT_LOCAL_ENGINE
-        rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
-        if (rc != 0) {
-            const char *err = dbmem_local_errmsg(ctx->l_engine);
-            memcpy(ctx->error_msg, err, strlen(err) + 1);
-            return rc;
-        }
-    #else
-        const char *err = "Local embedding cannot be computed because extension was compiled without local engine support";
-        memcpy(ctx->error_msg, err, strlen(err) + 1);
-        return 1;
-    #endif
+
+    // check embedding cache
+    uint64_t chunk_hash = 0;
+    bool cache_hit = false;
+    if (ctx->embedding_cache) {
+        chunk_hash = dbmem_hash_compute(text, len);
+        cache_hit = dbmem_cache_lookup(ctx, chunk_hash, &result);
     }
-    
-    if (!ctx->is_local) {
-    #ifndef DBMEM_OMIT_REMOTE_ENGINE
-        rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
-        if (rc != 0) {
-            const char *err = dbmem_remote_errmsg(ctx->r_engine);
+
+    if (!cache_hit) {
+        // compute embedding
+        if (ctx->is_local) {
+        #ifndef DBMEM_OMIT_LOCAL_ENGINE
+            rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
+            if (rc != 0) {
+                const char *err = dbmem_local_errmsg(ctx->l_engine);
+                memcpy(ctx->error_msg, err, strlen(err) + 1);
+                return rc;
+            }
+        #else
+            const char *err = "Local embedding cannot be computed because extension was compiled without local engine support";
             memcpy(ctx->error_msg, err, strlen(err) + 1);
-            return rc;
+            return 1;
+        #endif
         }
-    #else
-        const char *err = "Remote embedding cannot be computed because extension was compiled without remote engine support";
-        memcpy(ctx->error_msg, err, strlen(err) + 1);
-        return 1;
-    #endif
+
+        if (!ctx->is_local) {
+        #ifndef DBMEM_OMIT_REMOTE_ENGINE
+            rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
+            if (rc != 0) {
+                const char *err = dbmem_remote_errmsg(ctx->r_engine);
+                memcpy(ctx->error_msg, err, strlen(err) + 1);
+                return rc;
+            }
+        #else
+            const char *err = "Remote embedding cannot be computed because extension was compiled without remote engine support";
+            memcpy(ctx->error_msg, err, strlen(err) + 1);
+            return 1;
+        #endif
+        }
+
+        // store in cache on miss
+        if (ctx->embedding_cache) {
+            dbmem_cache_store(ctx, chunk_hash, &result);
+        }
     }
     
     // make sure dimension is the same
@@ -1281,6 +1420,12 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_function_v2(db, "memory_clear", 0, SQLITE_UTF8, ctx, dbmem_clear, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "memory_cache_clear", 0, SQLITE_UTF8, ctx, dbmem_cache_clear, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "memory_cache_clear", 2, SQLITE_UTF8, ctx, dbmem_cache_clear, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     rc = dbmem_register_search(db, ctx, pzErrMsg);

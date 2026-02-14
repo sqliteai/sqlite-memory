@@ -358,11 +358,41 @@ Deletes all memories from the database.
 **Notes:**
 - Clears `dbmem_content`, `dbmem_vault`, and `dbmem_vault_fts`
 - Does not delete settings from `dbmem_settings`
+- Does not clear the embedding cache (`dbmem_cache`)
 - Uses SAVEPOINT transaction for atomicity
 
 **Example:**
 ```sql
 SELECT memory_clear();
+```
+
+---
+
+#### `memory_cache_clear([provider TEXT, model TEXT])`
+
+Clears the embedding cache.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `provider` | TEXT | No | Provider name to clear cache for |
+| `model` | TEXT | No | Model name to clear cache for |
+
+**Returns:** INTEGER - Number of cache entries deleted
+
+**Notes:**
+- With 0 arguments: clears the entire embedding cache
+- With 2 arguments: clears cache entries for a specific provider/model combination
+- The embedding cache stores computed embeddings keyed by (text hash, provider, model) to avoid redundant computation
+- Safe to call at any time — does not affect stored memories
+
+**Example:**
+```sql
+-- Clear entire cache
+SELECT memory_cache_clear();
+
+-- Clear cache for a specific provider/model
+SELECT memory_cache_clear('openai', 'text-embedding-3-small');
 ```
 
 ---
@@ -434,6 +464,7 @@ AND context = 'meetings';
 | `text_weight` | REAL | 0.5 | Weight for FTS in scoring |
 | `min_score` | REAL | 0.7 | Minimum score threshold for results |
 | `update_access` | INTEGER | 1 | Update last_accessed on search |
+| `embedding_cache` | INTEGER | 1 | Cache embeddings to avoid redundant computation |
 
 ---
 

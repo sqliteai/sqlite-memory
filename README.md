@@ -184,6 +184,10 @@ SELECT memory_set_option('text_weight', 0.4);
 
 -- File processing
 SELECT memory_set_option('extensions', 'md,txt,rst');  -- File types to index
+
+-- Embedding cache (enabled by default)
+SELECT memory_set_option('embedding_cache', 0);        -- Disable cache
+SELECT memory_cache_clear();                           -- Clear cached embeddings
 ```
 
 ## Memory Management

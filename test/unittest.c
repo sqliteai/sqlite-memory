@@ -1931,6 +1931,124 @@ TEST(sqlite_sync_directory_skips_unchanged) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_cache_table_exists) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Check that dbmem_cache table exists
+    char sql[256];
+    int rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE name='dbmem_cache';",
+        sql, sizeof(sql));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(sql, "text_hash") != NULL);
+    ASSERT(strstr(sql, "provider") != NULL);
+    ASSERT(strstr(sql, "model") != NULL);
+    ASSERT(strstr(sql, "embedding") != NULL);
+    ASSERT(strstr(sql, "dimension") != NULL);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_clear_empty) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_cache_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);  // No rows deleted from empty cache
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_clear_with_data) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert some fake cache entries
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(111, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(222, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(333, 'local', 'nomic', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Clear all
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_cache_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 3);
+
+    // Verify empty
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_clear_by_provider_model) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert cache entries for different provider/model combos
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(111, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(222, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(333, 'local', 'nomic', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Clear only openai entries
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_cache_clear('openai', 'text-embedding-3-small');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    // Verify only local entry remains
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    char provider[64];
+    rc = exec_get_text(db, "SELECT provider FROM dbmem_cache;", provider, sizeof(provider));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(provider, "local");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_setting_default) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // embedding_cache should default to enabled (not in settings table, but enabled in context)
+    // Set it to 0, read back, set to 1, read back
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('embedding_cache', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('embedding_cache');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('embedding_cache', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('embedding_cache');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_delete_context_with_vault) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -2087,6 +2205,13 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_created_at_valid_range);
     RUN_TEST(sqlite_memory_clear_with_vault_fts);
     RUN_TEST(sqlite_memory_delete_context_with_vault);
+
+    printf("\nEmbedding cache tests:\n");
+    RUN_TEST(sqlite_cache_table_exists);
+    RUN_TEST(sqlite_cache_clear_empty);
+    RUN_TEST(sqlite_cache_clear_with_data);
+    RUN_TEST(sqlite_cache_clear_by_provider_model);
+    RUN_TEST(sqlite_cache_setting_default);
 #endif
 
     printf("\n=== Results ===\n");
