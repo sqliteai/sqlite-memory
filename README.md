@@ -33,6 +33,8 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 
 - **Hybrid Search**: Combines vector similarity (cosine distance) with FTS5 full-text search for superior retrieval
 - **Smart Chunking**: Markdown-aware parsing preserves semantic boundaries
+- **Intelligent Sync**: Content-hash change detection — unchanged files are skipped, modified files are atomically replaced, deleted files are cleaned up
+- **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction — either fully succeeds or fully rolls back, no partially-indexed content
 - **Efficient Storage**: Binary embeddings with configurable dimensions
 - **Flexible Embedding**: Use local models (llama.cpp) or [vectors.space](https://vectors.space) remote API
 
@@ -80,16 +82,16 @@ SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 -- SELECT memory_set_apikey('your-vectorspace-api-key');
 
 -- Add some knowledge
-SELECT memory_add_text('SQLite is a C-language library that implements a small, fast,
+SELECT memory_sync_text('SQLite is a C-language library that implements a small, fast,
 self-contained, high-reliability, full-featured, SQL database engine. SQLite is the
 most used database engine in the world.', 'sqlite-docs');
 
-SELECT memory_add_text('Vector databases store data as high-dimensional vectors,
+SELECT memory_sync_text('Vector databases store data as high-dimensional vectors,
 enabling similarity search. They are essential for semantic search, recommendation
 systems, and AI applications.', 'concepts');
 
--- Add an entire documentation directory
-SELECT memory_add_directory('/path/to/docs', 'project-docs');
+-- Sync an entire documentation directory
+SELECT memory_sync_directory('/path/to/docs', 'project-docs');
 
 -- Search your memory semantically
 SELECT path, snippet, ranking
@@ -121,7 +123,7 @@ conn.execute("SELECT memory_set_model('local', './models/nomic-embed-text-v1.5.Q
 
 # Store conversation context
 def remember(content, context="conversation"):
-    conn.execute("SELECT memory_add_text(?, ?)", (content, context))
+    conn.execute("SELECT memory_sync_text(?, ?)", (content, context))
     conn.commit()
 
 # Retrieve relevant memories
@@ -141,6 +143,20 @@ remember("Project deadline is March 15th, focusing on API integration.")
 memories = recall("what's the project timeline")
 # Returns relevant context about March 15th deadline
 ```
+
+## Intelligent Sync
+
+All `memory_sync_*` functions use content-hash change detection to avoid redundant work:
+
+- **`memory_sync_text`** — Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
+- **`memory_sync_file`** — Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped.
+- **`memory_sync_directory`** — Performs a full two-phase sync:
+  1. **Cleanup**: Removes database entries for files that no longer exist on disk
+  2. **Scan**: Recursively processes all matching files — adding new ones, replacing modified ones, and skipping unchanged ones
+
+Every sync operation is wrapped in a SQLite SAVEPOINT transaction. If anything fails mid-sync (embedding error, disk issue, etc.), the entire operation rolls back cleanly. There is no risk of partially-indexed files or orphaned entries.
+
+This makes all sync functions safe to call repeatedly — for example, on a cron schedule or at agent startup — with minimal overhead.
 
 ## Use Cases
 
@@ -217,7 +233,7 @@ make test
 
 - **Local Engine**: Built-in llama.cpp for on-device embeddings (requires GGUF model)
 - **Remote Engine**: [vectors.space](https://vectors.space) API for cloud embeddings (requires free API key)
-- **File I/O**: `memory_add_file` and `memory_add_directory` functions
+- **File I/O**: `memory_sync_file` and `memory_sync_directory` functions
 
 You can also combine options manually:
 

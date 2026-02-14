@@ -346,6 +346,45 @@ cleanup:
     return result;
 }
 
+static void dbmem_database_delete_hash (sqlite3 *db, sqlite3_int64 hash) {
+    sqlite3_stmt *vm = NULL;
+    if (fts5_is_available) {
+        sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault_fts WHERE hash=?1;", -1, &vm, NULL);
+        sqlite3_bind_int64(vm, 1, hash);
+        sqlite3_step(vm);
+        sqlite3_finalize(vm);
+    }
+    sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault WHERE hash=?1;", -1, &vm, NULL);
+    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_step(vm);
+    sqlite3_finalize(vm);
+
+    sqlite3_prepare_v2(db, "DELETE FROM dbmem_content WHERE hash=?1;", -1, &vm, NULL);
+    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_step(vm);
+    sqlite3_finalize(vm);
+}
+
+static void dbmem_database_delete_stale_path (sqlite3 *db, const char *path, uint64_t new_hash) {
+    if (!path) return;
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT hash FROM dbmem_content WHERE path=?1;", -1, &vm, NULL);
+    if (rc != SQLITE_OK) return;
+
+    sqlite3_bind_text(vm, 1, path, -1, SQLITE_STATIC);
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_ROW) {
+        sqlite3_int64 old_hash = sqlite3_column_int64(vm, 0);
+        sqlite3_finalize(vm);
+        if ((uint64_t)old_hash != new_hash) {
+            dbmem_database_delete_hash(db, old_hash);
+        }
+    } else {
+        sqlite3_finalize(vm);
+    }
+}
+
 static int dbmem_database_add_entry (dbmem_context *ctx, sqlite3 *db, uint64_t hash, const char *buffer, int64_t len) {
     static const char *sql = "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
 
@@ -1017,7 +1056,10 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
     sqlite3 *db = ctx->db;
     int rc = dbmem_database_begin_transaction(db);
     if (rc != SQLITE_OK) goto cleanup;
-    
+
+    // delete old entry if this path was previously indexed with different content
+    dbmem_database_delete_stale_path(db, ctx->path, hash);
+
     rc = dbmem_database_add_entry(ctx, db, hash, buffer, len);
     if (rc != SQLITE_OK) goto cleanup;
     
@@ -1069,10 +1111,10 @@ static int dbmem_scan_callback (const char *path, void *data) {
     return rc;
 }
 
-static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_sync_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_text expects a parameter of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_sync_text expects a parameter of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -1094,10 +1136,10 @@ static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **
 }
 
 #ifndef DBMEM_OMIT_IO
-static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_sync_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_sync_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -1117,31 +1159,59 @@ static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **
     (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
 
-static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
-    // sanity check type
-    if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
+static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_path) {
+    char *sql = sqlite3_mprintf("SELECT hash, path FROM dbmem_content WHERE path LIKE '%q%%';", dir_path);
+    if (!sql) return;
+
+    char **table = NULL;
+    int nrow = 0, ncol = 0;
+    int rc = sqlite3_get_table(db, sql, &table, &nrow, &ncol, NULL);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK || nrow == 0) {
+        if (table) sqlite3_free_table(table);
         return;
     }
-    
+
+    dbmem_database_begin_transaction(db);
+    for (int i = 0; i < nrow; i++) {
+        const char *path = table[ncol + i * ncol + 1];
+        if (dbmem_file_exists(path)) continue;
+        sqlite3_int64 hash = strtoll(table[ncol + i * ncol], NULL, 10);
+        dbmem_database_delete_hash(db, hash);
+    }
+    dbmem_database_commit_transaction(db);
+    sqlite3_free_table(table);
+}
+
+static void dbmem_sync_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    // sanity check type
+    if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "The function memory_sync_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        return;
+    }
+
     // retrieve dbmem_context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
     const char *path = (const char *)sqlite3_value_text(argv[0]);
-    
+
     // reset temp values
     dbmem_context_reset_temp_values(ctx);
-    
+
     // check for optional memory context
     if ((argc == 2) && (sqlite3_value_type(argv[1]) == SQLITE_TEXT)) {
         ctx->context = (const char *)sqlite3_value_text(argv[1]);
     }
-    
+
     if (!dbmem_dir_exists(path)) {
         snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to find directory at path %s", path);
         sqlite3_result_error(context, ctx->error_msg, SQLITE_ERROR);
         return;
     }
-    
+
+    // Phase 1: remove entries whose files no longer exist on disk
+    dbmem_database_delete_missing_files(ctx->db, path);
+
+    // Phase 2: add new + reindex changed (hash-skip handles unchanged)
     int rc = dbmem_dir_scan(path, dbmem_scan_callback, ctx);
     (rc == 0) ? sqlite3_result_int64(context, ctx->counter) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
@@ -1185,23 +1255,23 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     if (rc != SQLITE_OK) return rc;
     
     #ifndef DBMEM_OMIT_IO
-    rc = sqlite3_create_function_v2(db, "memory_add_file", 1, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_sync_file", 1, SQLITE_UTF8, ctx, dbmem_sync_file, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = sqlite3_create_function_v2(db, "memory_add_file", 2, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_sync_file", 2, SQLITE_UTF8, ctx, dbmem_sync_file, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    rc = sqlite3_create_function_v2(db, "memory_add_directory", 1, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_sync_directory", 1, SQLITE_UTF8, ctx, dbmem_sync_directory, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    rc = sqlite3_create_function_v2(db, "memory_add_directory", 2, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
+
+    rc = sqlite3_create_function_v2(db, "memory_sync_directory", 2, SQLITE_UTF8, ctx, dbmem_sync_directory, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     #endif
     
-    rc = sqlite3_create_function_v2(db, "memory_add_text", 1, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_sync_text", 1, SQLITE_UTF8, ctx, dbmem_sync_text, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function_v2(db, "memory_add_text", 2, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_sync_text", 2, SQLITE_UTF8, ctx, dbmem_sync_text, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_function_v2(db, "memory_delete", 1, SQLITE_UTF8, ctx, dbmem_delete, NULL, NULL, NULL);

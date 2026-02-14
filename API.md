@@ -5,6 +5,7 @@ A SQLite extension that provides semantic memory capabilities with hybrid search
 ## Table of Contents
 
 - [Overview](#overview)
+- [Sync Behavior](#sync-behavior)
 - [Loading the Extension](#loading-the-extension)
 - [SQL Functions](#sql-functions)
   - [General Functions](#general-functions)
@@ -26,6 +27,31 @@ sqlite-memory enables semantic search over text content stored in SQLite. It:
 2. **Generates embeddings** for each chunk using the built-in llama.cpp engine (`"local"` provider) or the [vectors.space](https://vectors.space) remote service
 3. **Stores** embeddings and full-text content for hybrid search
 4. **Searches** using vector similarity combined with FTS5 full-text search
+
+---
+
+## Sync Behavior
+
+All `memory_sync_*` functions use **content-hash change detection** to avoid redundant embedding computation. Each piece of content is hashed before processing — if the hash already exists in the database, the content is skipped.
+
+### Change Detection
+
+| Scenario | Behavior |
+|----------|----------|
+| New content | Chunked, embedded, and indexed |
+| Unchanged content | Skipped (hash match) |
+| Modified file | Old entry atomically deleted, new content reindexed |
+| Deleted file | Entry removed during directory sync |
+
+### Transactional Safety
+
+Every sync operation is wrapped in a SQLite **SAVEPOINT** transaction. If any step fails (embedding error, disk issue, constraint violation), the entire operation rolls back. This guarantees:
+
+- **No partially-indexed files** — content is either fully indexed or not at all
+- **No orphaned chunks** — embeddings and FTS entries are always consistent with `dbmem_content`
+- **Safe to retry** — a failed sync leaves the database in its previous valid state
+
+This makes all sync functions idempotent and safe to call repeatedly (e.g., on a schedule or at application startup).
 
 ---
 
@@ -174,9 +200,9 @@ SELECT memory_get_option('provider');
 
 ### Memory Management Functions
 
-#### `memory_add_text(content TEXT [, context TEXT])`
+#### `memory_sync_text(content TEXT [, context TEXT])`
 
-Adds text content to memory.
+Syncs text content to memory. Duplicate content (same hash) is skipped automatically.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -189,23 +215,24 @@ Adds text content to memory.
 **Notes:**
 - Content is chunked based on `max_tokens` and `overlay_tokens` settings
 - Each chunk is embedded and stored in `dbmem_vault`
-- Content hash prevents duplicate storage
+- Content hash prevents duplicate storage — calling with the same content is a no-op
+- Runs inside a SAVEPOINT transaction (see [Sync Behavior](#sync-behavior))
 - Sets `created_at` timestamp automatically
 
 **Example:**
 ```sql
 -- Add text without context
-SELECT memory_add_text('SQLite is a C-language library that implements a small, fast, self-contained SQL database engine.');
+SELECT memory_sync_text('SQLite is a C-language library that implements a small, fast, self-contained SQL database engine.');
 
 -- Add text with context
-SELECT memory_add_text('Important meeting notes from 2024-01-15...', 'meetings');
+SELECT memory_sync_text('Important meeting notes from 2024-01-15...', 'meetings');
 ```
 
 ---
 
-#### `memory_add_file(path TEXT [, context TEXT])`
+#### `memory_sync_file(path TEXT [, context TEXT])`
 
-Adds a file to memory.
+Syncs a file to memory. Unchanged files are skipped; modified files are atomically replaced.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -218,19 +245,20 @@ Adds a file to memory.
 **Notes:**
 - Only processes files matching configured extensions (default: `md,mdx`)
 - File path is stored in `dbmem_content.path`
+- If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is deleted and new content is reindexed — all within a single SAVEPOINT transaction (see [Sync Behavior](#sync-behavior))
 - Not available when compiled with `DBMEM_OMIT_IO`
 
 **Example:**
 ```sql
-SELECT memory_add_file('/docs/readme.md');
-SELECT memory_add_file('/docs/api.md', 'documentation');
+SELECT memory_sync_file('/docs/readme.md');
+SELECT memory_sync_file('/docs/api.md', 'documentation');
 ```
 
 ---
 
-#### `memory_add_directory(path TEXT [, context TEXT])`
+#### `memory_sync_directory(path TEXT [, context TEXT])`
 
-Recursively adds all matching files from a directory.
+Synchronizes a directory with memory. Adds new files, reindexes modified files, and removes entries for deleted files.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -238,19 +266,30 @@ Recursively adds all matching files from a directory.
 | `path` | TEXT | Yes | Full path to the directory |
 | `context` | TEXT | No | Optional context label applied to all files |
 
-**Returns:** INTEGER - Number of files processed
+**Returns:** INTEGER - Number of new files processed
 
 **Notes:**
 - Recursively scans subdirectories
 - Only processes files matching configured extensions
+- **Phase 1 — Cleanup**: Removes entries for files that no longer exist on disk
+- **Phase 2 — Scan**: Processes all matching files:
+  - **New files** are chunked, embedded, and added to the index
+  - **Unchanged files** are skipped (content hash match)
+  - **Modified files** have their old entries atomically replaced with new content
+- Each file is processed inside its own SAVEPOINT transaction (see [Sync Behavior](#sync-behavior))
+- Safe to call repeatedly — only changed content triggers embedding computation
 - Not available when compiled with `DBMEM_OMIT_IO`
 
 **Example:**
 ```sql
-SELECT memory_add_directory('/path/to/docs');
--- Returns: 42 (number of files added)
+SELECT memory_sync_directory('/path/to/docs');
+-- Returns: 42 (number of new files processed)
 
-SELECT memory_add_directory('/project/notes', 'project-notes');
+SELECT memory_sync_directory('/project/notes', 'project-notes');
+
+-- Safe to call again — unchanged files are skipped
+SELECT memory_sync_directory('/path/to/docs');
+-- Returns: 0 (nothing changed)
 ```
 
 ---
@@ -404,7 +443,7 @@ The extension tracks two timestamps for each memory:
 
 ### `created_at`
 
-- Set automatically when content is added via `memory_add_text`, `memory_add_file`, or `memory_add_directory`
+- Set automatically when content is added via `memory_sync_text`, `memory_sync_file`, or `memory_sync_directory`
 - Stored as Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
 - Never updated after initial creation
 
@@ -445,8 +484,8 @@ SELECT memory_set_option('max_tokens', 512);
 SELECT memory_set_option('min_score', 0.75);
 
 -- Add content
-SELECT memory_add_text('SQLite is a C library that provides a lightweight disk-based database.', 'sqlite-docs');
-SELECT memory_add_directory('/docs/sqlite', 'sqlite-docs');
+SELECT memory_sync_text('SQLite is a C library that provides a lightweight disk-based database.', 'sqlite-docs');
+SELECT memory_sync_directory('/docs/sqlite', 'sqlite-docs');
 
 -- Search
 SELECT path, snippet, ranking
@@ -474,9 +513,9 @@ SELECT memory_clear();
 
 ```sql
 -- Add memories with different contexts
-SELECT memory_add_text('Meeting notes...', 'meetings');
-SELECT memory_add_text('API documentation...', 'api-docs');
-SELECT memory_add_text('Tutorial content...', 'tutorials');
+SELECT memory_sync_text('Meeting notes...', 'meetings');
+SELECT memory_sync_text('API documentation...', 'api-docs');
+SELECT memory_sync_text('Tutorial content...', 'tutorials');
 
 -- Search within a context
 SELECT * FROM memory_search
@@ -546,6 +585,6 @@ Errors can be caught using standard SQLite error handling mechanisms.
 
 ```sql
 -- Example error handling in application code
-SELECT memory_add_text(123);  -- Error: expects TEXT parameter
+SELECT memory_sync_text(123);  -- Error: expects TEXT parameter
 SELECT memory_delete('abc');  -- Error: expects INTEGER parameter
 ```
