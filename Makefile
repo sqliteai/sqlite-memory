@@ -204,6 +204,13 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         # Target Windows 7+ (0x0601) - llama.cpp core doesn't need newer APIs
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601"
         LDFLAGS := -shared -lbcrypt -static-libgcc -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
+        # Windows: use cmake --install paths
+        GGML_PREFIX := $(BUILD_DIR)/ggml
+        LLAMA_LIBS := $(GGML_PREFIX)/lib/libllama.a \
+                      $(GGML_PREFIX)/lib/ggml.a \
+                      $(GGML_PREFIX)/lib/ggml-base.a \
+                      $(GGML_PREFIX)/lib/ggml-cpu.a \
+                      $(LLAMA_BUILD)/common/libcommon.a
     else ifeq ($(PLATFORM),android)
         # Android NDK cmake toolchain
         ANDROID_OPTIONS := -DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
@@ -295,6 +302,25 @@ extension: $(BUILD_DEPS) $(TARGET)
 
 # Build llama.cpp (only if not omitted)
 .PHONY: llama
+ifeq ($(PLATFORM),windows)
+# Windows: use cmake --install for consistent library paths
+llama: $(GGML_PREFIX)/lib/libllama.a
+
+$(GGML_PREFIX)/lib/libllama.a:
+	@echo "Building llama.cpp with options: $(LLAMA_OPTIONS)"
+	@mkdir -p $(LLAMA_BUILD) $(GGML_PREFIX)
+	cmake -B $(LLAMA_BUILD) $(LLAMA_OPTIONS) $(LLAMA_DIR)
+	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS)
+	cmake --install $(LLAMA_BUILD) --prefix $(GGML_PREFIX)
+	@echo "llama.cpp build complete"
+
+# Windows LLAMA_LIBS dependencies
+$(GGML_PREFIX)/lib/ggml.a $(GGML_PREFIX)/lib/ggml-base.a $(GGML_PREFIX)/lib/ggml-cpu.a: $(GGML_PREFIX)/lib/libllama.a
+	@:
+$(LLAMA_BUILD)/common/libcommon.a: $(GGML_PREFIX)/lib/libllama.a
+	@:
+else
+# Unix: use build directory paths directly
 llama: $(LLAMA_BUILD)/src/libllama.a
 
 $(LLAMA_BUILD)/src/libllama.a:
@@ -307,6 +333,7 @@ $(LLAMA_BUILD)/src/libllama.a:
 # All LLAMA_LIBS are built by the same cmake command as libllama.a
 $(LLAMA_BUILD)/ggml/src/libggml.a $(LLAMA_BUILD)/ggml/src/libggml-base.a $(LLAMA_BUILD)/ggml/src/libggml-cpu.a $(LLAMA_BUILD)/common/libcommon.a $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a: $(LLAMA_BUILD)/src/libllama.a
 	@:
+endif
 
 # Create directories
 $(BUILD_DIR):
