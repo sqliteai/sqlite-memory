@@ -374,13 +374,8 @@ jobs:
           rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
           echo "::endgroup::"
 
-          echo "::group::prepare the test script"
-          make test PLATFORM=$PLATFORM ARCH=$ARCH || echo "It should fail. Running remaining commands in the emulator"
-          cat > commands.sh << EOF
-            mv -f /data/local/tmp/sqlite3 /system/xbin
-            cd /data/local/tmp
-            $(make test PLATFORM=$PLATFORM ARCH=$ARCH -n)
-          EOF
+          echo "::group::build unittest binary for android"
+          make build/unittest ${{ matrix.make }}
           echo "::endgroup::"
 
       - name: android test sqlite-memory
@@ -390,13 +385,19 @@ jobs:
           api-level: 26
           arch: ${{ matrix.arch }}
           script: |
+            set -e
             adb root
             adb remount
-            adb push ${{ github.workspace }}/commands.sh /data/local/tmp/
             adb push ${{ github.workspace }}/sqlite3 /data/local/tmp/
-            adb push ${{ github.workspace }}/dist /data/local/tmp/
-            adb push ${{ github.workspace }}/Makefile /data/local/tmp/
-            adb shell "sh /data/local/tmp/commands.sh"
+            adb shell "mv -f /data/local/tmp/sqlite3 /system/xbin/"
+            adb push ${{ github.workspace }}/dist/memory.so /data/local/tmp/
+            adb push ${{ github.workspace }}/build/unittest /data/local/tmp/
+            adb shell "chmod +x /data/local/tmp/unittest"
+            echo "Running unit tests..."
+            adb shell "/data/local/tmp/unittest"
+            echo "Testing extension loading..."
+            adb shell "sqlite3 :memory: '.load /data/local/tmp/memory.so' 'SELECT memory_version();'"
+            echo "Extension loading test passed!"
 
       - name: unix test sqlite-memory
         if: matrix.skip_test != true && matrix.os != 'windows-2022' && matrix.name != 'android'
