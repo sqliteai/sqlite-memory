@@ -330,7 +330,9 @@ $(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) | $(DIST_DIR)
 .PHONY: test
 test: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/unittest
 	@echo "Running unit tests..."
-	@mkdir -p /tmp
+ifeq ($(PLATFORM),windows)
+	@mkdir -p $(BUILD_DIR)/test_tmp
+endif
 	@$(BUILD_DIR)/unittest
 	@echo ""
 	@echo "Testing extension loading..."
