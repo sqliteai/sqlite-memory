@@ -152,11 +152,12 @@ else ifeq ($(PLATFORM),ios-sim)
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 -framework Security
 endif
 
-# Base llama.cpp cmake options
+# Base llama.cpp cmake options (minimal build - no curl, httplib, server, rpc)
 LLAMA_OPTIONS := $(LLAMA) \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
     -DLLAMA_CURL=OFF \
+    -DLLAMA_HTTPLIB=OFF \
     -DLLAMA_BUILD_EXAMPLES=OFF \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_TOOLS=OFF \
@@ -200,8 +201,8 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     else ifeq ($(PLATFORM),linux)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     else ifeq ($(PLATFORM),windows)
-        # Target Windows 8+ for CreateFile2 support in cpp-httplib
-        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0602"
+        # Target Windows 7+ (0x0601) - llama.cpp core doesn't need newer APIs
+        LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601"
         LDFLAGS := -shared -lbcrypt -static-libgcc -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
     else ifeq ($(PLATFORM),android)
         # Android NDK cmake toolchain
@@ -467,16 +468,16 @@ xcframework:
 		rm -rf $(BUILD_DIR) && MAKEFLAGS= $(MAKE) PLATFORM=macos OMIT_LOCAL_ENGINE=1 && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_remote.dylib
 	$(call create_xcframework,_remote,memory-remote)
-	@# Build local variant (llama.cpp only) - need distclean between platforms to rebuild llama.cpp
-	rm -rf $(DIST_DIR) && MAKEFLAGS= $(MAKE) distclean && MAKEFLAGS= $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
+	@# Build local variant (llama.cpp only) - need to clear llama.cpp build between platforms
+	rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_local.dylib && \
 		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_local.dylib && \
 		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=macos OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_local.dylib
 	$(call create_xcframework,_local,memory-local)
-	@# Build full variant (both) - need distclean between platforms to rebuild llama.cpp
-	rm -rf $(DIST_DIR) && MAKEFLAGS= $(MAKE) distclean && MAKEFLAGS= $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA) && \
+	@# Build full variant (both) - need to clear llama.cpp build between platforms
+	rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_full.dylib && \
 		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios-sim_full.dylib && \
