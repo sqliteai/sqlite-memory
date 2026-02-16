@@ -105,7 +105,7 @@ else ifeq ($(PLATFORM),android)
     endif
 
     LDFLAGS := -shared -static-libstdc++ -llog -Wl,-z,max-page-size=16384
-    TEST_LDFLAGS := -ldl -llog
+    TEST_LDFLAGS := -static-libstdc++ -ldl -llog
 
 else ifeq ($(PLATFORM),ios)
     EXT := dylib
