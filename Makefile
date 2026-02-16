@@ -170,12 +170,20 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     INCLUDES += -I$(GGML_PREFIX)/include
     C_SOURCES += $(SRC_DIR)/dbmem-lembed.c
 
-    # llama.cpp static libraries
-    LLAMA_LIBS := $(GGML_PREFIX)/lib/libllama.a \
-                  $(GGML_PREFIX)/lib/libggml.a \
-                  $(GGML_PREFIX)/lib/libggml-base.a \
-                  $(GGML_PREFIX)/lib/libggml-cpu.a \
-                  $(LLAMA_BUILD)/common/libcommon.a
+    # llama.cpp static libraries (Windows cmake doesn't add lib prefix to ggml libs)
+    ifeq ($(PLATFORM),windows)
+        LLAMA_LIBS := $(GGML_PREFIX)/lib/libllama.a \
+                      $(GGML_PREFIX)/lib/ggml.a \
+                      $(GGML_PREFIX)/lib/ggml-base.a \
+                      $(GGML_PREFIX)/lib/ggml-cpu.a \
+                      $(LLAMA_BUILD)/common/libcommon.a
+    else
+        LLAMA_LIBS := $(GGML_PREFIX)/lib/libllama.a \
+                      $(GGML_PREFIX)/lib/libggml.a \
+                      $(GGML_PREFIX)/lib/libggml-base.a \
+                      $(GGML_PREFIX)/lib/libggml-cpu.a \
+                      $(LLAMA_BUILD)/common/libcommon.a
+    endif
 
     # Platform-specific llama.cpp settings
     ifeq ($(PLATFORM),macos)
@@ -305,8 +313,10 @@ $(GGML_PREFIX)/lib/libllama.a:
 	cmake --install $(LLAMA_BUILD) --prefix $(GGML_PREFIX)
 	@echo "llama.cpp build complete"
 
-# All LLAMA_LIBS are installed by cmake --install
+# All LLAMA_LIBS are installed by cmake --install (with or without lib prefix depending on platform)
 $(GGML_PREFIX)/lib/libggml.a $(GGML_PREFIX)/lib/libggml-base.a $(GGML_PREFIX)/lib/libggml-cpu.a $(GGML_PREFIX)/lib/libggml-metal.a $(GGML_PREFIX)/lib/libggml-blas.a $(GGML_PREFIX)/lib/libggml-vulkan.a $(GGML_PREFIX)/lib/libggml-opencl.a: $(GGML_PREFIX)/lib/libllama.a
+	@:
+$(GGML_PREFIX)/lib/ggml.a $(GGML_PREFIX)/lib/ggml-base.a $(GGML_PREFIX)/lib/ggml-cpu.a: $(GGML_PREFIX)/lib/libllama.a
 	@:
 
 # libcommon.a is not installed, reference it from build dir
