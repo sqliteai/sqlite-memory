@@ -38,6 +38,7 @@ BUILD_DIR   := build
 DIST_DIR    := dist
 LLAMA_DIR   := modules/llama.cpp
 LLAMA_BUILD := $(LLAMA_DIR)/build
+GGML_PREFIX := $(BUILD_DIR)/ggml
 TEST_DIR    := test
 
 # Version from header
@@ -152,7 +153,6 @@ else ifeq ($(PLATFORM),ios-sim)
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 -framework Security
 endif
 
-# Base llama.cpp cmake options (minimal build - no curl, httplib, server, rpc)
 LLAMA_OPTIONS := $(LLAMA) \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
@@ -167,22 +167,22 @@ LLAMA_OPTIONS := $(LLAMA) \
 # Conditional: Local embedding engine (llama.cpp)
 ifeq ($(OMIT_LOCAL_ENGINE),0)
     # Include llama.cpp
-    INCLUDES += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
+    INCLUDES += -I$(GGML_PREFIX)/include
     C_SOURCES += $(SRC_DIR)/dbmem-lembed.c
 
-    # llama.cpp static libraries (base set)
-    LLAMA_LIBS := $(LLAMA_BUILD)/src/libllama.a \
-                  $(LLAMA_BUILD)/ggml/src/libggml.a \
-                  $(LLAMA_BUILD)/ggml/src/libggml-base.a \
-                  $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
+    # llama.cpp static libraries
+    LLAMA_LIBS := $(GGML_PREFIX)/lib/libllama.a \
+                  $(GGML_PREFIX)/lib/libggml.a \
+                  $(GGML_PREFIX)/lib/libggml-base.a \
+                  $(GGML_PREFIX)/lib/libggml-cpu.a \
                   $(LLAMA_BUILD)/common/libcommon.a
 
     # Platform-specific llama.cpp settings
     ifeq ($(PLATFORM),macos)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
         # Add Metal and BLAS libraries for macOS (cmake auto-detects and builds these)
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-metal.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-blas.a
         ifeq ($(ARCH),x86_64)
             LLAMA_OPTIONS += -DCMAKE_OSX_ARCHITECTURES="x86_64"
         else ifeq ($(ARCH),arm64)
@@ -220,16 +220,16 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     else ifeq ($(PLATFORM),ios)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
         # Add Metal and BLAS libraries for iOS
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-metal.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-blas.a
         LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0 \
             -framework Metal -framework Foundation -framework Accelerate -framework CoreFoundation -framework Security \
             -ldl -lpthread -lm -headerpad_max_install_names
     else ifeq ($(PLATFORM),ios-sim)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
         # Add Metal and BLAS libraries for iOS simulator
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-metal.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-blas.a
         LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 \
             -framework Metal -framework Foundation -framework Accelerate -framework CoreFoundation -framework Security \
             -ldl -lpthread -lm -headerpad_max_install_names
@@ -237,7 +237,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
 
     # Backend-specific libraries (detected from LLAMA cmake flags for explicit overrides)
     ifneq (,$(findstring GGML_VULKAN=ON,$(LLAMA)))
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-vulkan.a
         ifeq ($(PLATFORM),windows)
             ifdef VULKAN_SDK
                 LDFLAGS += -L$(VULKAN_SDK)/lib -lvulkan-1
@@ -253,7 +253,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         endif
     endif
     ifneq (,$(findstring GGML_OPENCL=ON,$(LLAMA)))
-        LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a
+        LLAMA_LIBS += $(GGML_PREFIX)/lib/libggml-opencl.a
         LDFLAGS += -lOpenCL
     endif
 
@@ -295,17 +295,22 @@ extension: $(BUILD_DEPS) $(TARGET)
 
 # Build llama.cpp (only if not omitted)
 .PHONY: llama
-llama: $(LLAMA_BUILD)/src/libllama.a
+llama: $(GGML_PREFIX)/lib/libllama.a
 
-$(LLAMA_BUILD)/src/libllama.a:
+$(GGML_PREFIX)/lib/libllama.a:
 	@echo "Building llama.cpp with options: $(LLAMA_OPTIONS)"
-	@mkdir -p $(LLAMA_BUILD)
+	@mkdir -p $(LLAMA_BUILD) $(GGML_PREFIX)
 	cmake -B $(LLAMA_BUILD) $(LLAMA_OPTIONS) $(LLAMA_DIR)
 	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS)
+	cmake --install $(LLAMA_BUILD) --prefix $(GGML_PREFIX)
 	@echo "llama.cpp build complete"
 
-# All LLAMA_LIBS are built by the same cmake command as libllama.a
-$(LLAMA_BUILD)/ggml/src/libggml.a $(LLAMA_BUILD)/ggml/src/libggml-base.a $(LLAMA_BUILD)/ggml/src/libggml-cpu.a $(LLAMA_BUILD)/common/libcommon.a $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a: $(LLAMA_BUILD)/src/libllama.a
+# All LLAMA_LIBS are installed by cmake --install
+$(GGML_PREFIX)/lib/libggml.a $(GGML_PREFIX)/lib/libggml-base.a $(GGML_PREFIX)/lib/libggml-cpu.a $(GGML_PREFIX)/lib/libggml-metal.a $(GGML_PREFIX)/lib/libggml-blas.a $(GGML_PREFIX)/lib/libggml-vulkan.a $(GGML_PREFIX)/lib/libggml-opencl.a: $(GGML_PREFIX)/lib/libllama.a
+	@:
+
+# libcommon.a is not installed, reference it from build dir
+$(LLAMA_BUILD)/common/libcommon.a: $(GGML_PREFIX)/lib/libllama.a
 	@:
 
 # Create directories
