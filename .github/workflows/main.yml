@@ -343,16 +343,18 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           echo "::endgroup::"
 
-          echo "::group::build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
+          echo "::group::download sqlite3 amalgamation"
           curl -O ${{ matrix.sqlite-amalgamation-zip }}
           unzip sqlite-amalgamation-*.zip
-          export ${{ matrix.make }}
-          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
-          rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
+          SQLITE_DIR=$(ls -d sqlite-amalgamation-*)
+          echo "::endgroup::"
+
+          echo "::group::build sqlite3 shell for android"
+          $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang ${SQLITE_DIR}/shell.c ${SQLITE_DIR}/sqlite3.c -o sqlite3 -ldl
           echo "::endgroup::"
 
           echo "::group::build unittest binary for android"
-          make build/unittest ${{ matrix.make }}
+          make build/unittest ${{ matrix.make }} SQLITE_AMALGAM=${SQLITE_DIR}/sqlite3.c
           echo "::endgroup::"
 
       - name: android test sqlite-memory

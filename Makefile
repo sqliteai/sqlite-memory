@@ -105,6 +105,7 @@ else ifeq ($(PLATFORM),android)
     endif
 
     LDFLAGS := -shared -static-libstdc++ -llog -Wl,-z,max-page-size=16384
+    TEST_LDFLAGS := -ldl -llog
 
 else ifeq ($(PLATFORM),ios)
     EXT := dylib
@@ -326,6 +327,13 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     endif
 endif
 
+# Android: compile SQLite amalgamation into unittest (set SQLITE_AMALGAM=path/to/sqlite3.c)
+SQLITE_AMALGAM ?=
+TEST_SQLITE_OBJ :=
+ifneq ($(SQLITE_AMALGAM),)
+    TEST_SQLITE_OBJ := $(BUILD_DIR)/test-sqlite3.o
+endif
+
 $(BUILD_DIR)/unittest.o: $(TEST_DIR)/unittest.c | $(BUILD_DIR)
 	@echo "Compiling unittest.c..."
 	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
@@ -334,11 +342,15 @@ $(BUILD_DIR)/test-%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $< (for test)..."
 	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
 
+$(BUILD_DIR)/test-sqlite3.o: $(SQLITE_AMALGAM) | $(BUILD_DIR)
+	@echo "Compiling sqlite3.c (amalgamation)..."
+	@$(CC) $(CFLAGS) -DSQLITE_ENABLE_FTS5 -c $< -o $@
+
 TEST_C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/test-%.o,$(C_SOURCES))
 
-$(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(LLAMA_LIBS) | $(BUILD_DIR)
+$(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) | $(BUILD_DIR)
 	@echo "Linking unittest..."
-	@$(LINKER) $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(LLAMA_LIBS) \
+	@$(LINKER) $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
 		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
 		-o $@
 
