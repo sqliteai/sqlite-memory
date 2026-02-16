@@ -1778,6 +1778,405 @@ TEST(sqlite_memory_clear_with_vault_fts) {
     sqlite3_close(db);
 }
 
+// Helper to insert a fake dbmem_content entry with a known path, hash, and length
+static int insert_fake_content(sqlite3 *db, sqlite3_int64 hash, const char *path, const char *context, sqlite3_int64 length) {
+    sqlite3_stmt *vm = NULL;
+    const char *sql = "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+                      "VALUES (?1, ?2, 'fake', ?3, ?4, 0);";
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_bind_text(vm, 2, path, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(vm, 3, length);
+    if (context) sqlite3_bind_text(vm, 4, context, -1, SQLITE_STATIC);
+    else sqlite3_bind_null(vm, 4);
+    rc = sqlite3_step(vm);
+    sqlite3_finalize(vm);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+
+TEST(sqlite_sync_directory_removes_deleted) {
+    // Test that memory_sync_directory removes entries for files no longer on disk
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *test_dir = "/tmp/dbmem_test_sync_del";
+    const char *file_keep = "/tmp/dbmem_test_sync_del/keep.md";
+
+    // Clean up
+    remove(file_keep);
+    remove("/tmp/dbmem_test_sync_del/gone.md");
+    rmdir_p(test_dir);
+
+    // Create directory with one file
+    mkdir_p(test_dir);
+    create_test_file(file_keep, "# Keep me\nStill here.");
+
+    // Pre-insert entries: one for the existing file (with correct hash),
+    // and one for a file that no longer exists
+    int64_t len = 0;
+    char *buf = dbmem_file_read(file_keep, &len);
+    ASSERT(buf != NULL);
+    uint64_t keep_hash = dbmem_hash_compute(buf, (size_t)len);
+    dbmem_free(buf);
+
+    int rc = insert_fake_content(db, (sqlite3_int64)keep_hash, file_keep, NULL, len);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = insert_fake_content(db, 99999, "/tmp/dbmem_test_sync_del/gone.md", NULL, 4);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify 2 entries before sync
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    // Sync — should remove the entry for gone.md, skip keep.md (hash match)
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_sync_directory('/tmp/dbmem_test_sync_del');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Only keep.md entry should remain
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    char path[256];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content;", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(path, "keep.md") != NULL);
+
+    remove(file_keep);
+    rmdir_p(test_dir);
+    sqlite3_close(db);
+}
+
+TEST(sqlite_sync_directory_removes_all_deleted) {
+    // Test sync on a directory where ALL previously indexed files were deleted
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *test_dir = "/tmp/dbmem_test_sync_allgone";
+    remove("/tmp/dbmem_test_sync_allgone/x.md");
+    rmdir_p(test_dir);
+    mkdir_p(test_dir);  // empty directory
+
+    // Insert fake entries pointing to files that don't exist
+    int rc = insert_fake_content(db, 1001, "/tmp/dbmem_test_sync_allgone/a.md", "ctx", 4);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = insert_fake_content(db, 1002, "/tmp/dbmem_test_sync_allgone/b.md", "ctx", 4);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = insert_fake_content(db, 1003, "/tmp/dbmem_test_sync_allgone/c.md", "ctx", 4);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Also insert vault entries to verify cascade delete
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES "
+        "(1001, 0, X'00000000', 0, 4), "
+        "(1002, 0, X'00000000', 0, 4), "
+        "(1003, 0, X'00000000', 0, 4);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 3);
+
+    // Sync — all files gone, all entries should be removed
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_sync_directory('/tmp/dbmem_test_sync_allgone');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    // Vault entries should also be gone
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rmdir_p(test_dir);
+    sqlite3_close(db);
+}
+
+TEST(sqlite_sync_directory_skips_unchanged) {
+    // Test that sync skips files whose content hash hasn't changed
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *test_dir = "/tmp/dbmem_test_sync_skip";
+    const char *file = "/tmp/dbmem_test_sync_skip/note.md";
+    const char *content = "# My Note\nSome content.";
+
+    remove(file);
+    rmdir_p(test_dir);
+    mkdir_p(test_dir);
+    create_test_file(file, content);
+
+    // Compute the hash and pre-insert the entry
+    uint64_t hash = dbmem_hash_compute(content, strlen(content));
+    int rc = insert_fake_content(db, (sqlite3_int64)hash, file, "notes", (sqlite3_int64)strlen(content));
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Sync — file exists with matching hash, should be skipped
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_sync_directory('/tmp/dbmem_test_sync_skip', 'notes');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Entry still exists unchanged (no duplication)
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    remove(file);
+    rmdir_p(test_dir);
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_table_exists) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Check that dbmem_cache table exists
+    char sql[256];
+    int rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE name='dbmem_cache';",
+        sql, sizeof(sql));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(sql, "text_hash") != NULL);
+    ASSERT(strstr(sql, "provider") != NULL);
+    ASSERT(strstr(sql, "model") != NULL);
+    ASSERT(strstr(sql, "embedding") != NULL);
+    ASSERT(strstr(sql, "dimension") != NULL);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_clear_empty) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_cache_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);  // No rows deleted from empty cache
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_clear_with_data) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert some fake cache entries
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(111, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(222, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(333, 'local', 'nomic', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Clear all
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_cache_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 3);
+
+    // Verify empty
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_clear_by_provider_model) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Insert cache entries for different provider/model combos
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(111, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(222, 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "(333, 'local', 'nomic', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Clear only openai entries
+    sqlite3_int64 result;
+    rc = exec_get_int(db, "SELECT memory_cache_clear('openai', 'text-embedding-3-small');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    // Verify only local entry remains
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    char provider[64];
+    rc = exec_get_text(db, "SELECT provider FROM dbmem_cache;", provider, sizeof(provider));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(provider, "local");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_setting_default) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // embedding_cache should default to enabled (not in settings table, but enabled in context)
+    // Set it to 0, read back, set to 1, read back
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('embedding_cache', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('embedding_cache');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('embedding_cache', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('embedding_cache');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_max_entries_setting) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Default is 0 (no limit)
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 100);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('cache_max_entries');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 100);
+
+    // Set back to 0 (no limit)
+    rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('cache_max_entries');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_eviction) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Set max entries to 3
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 3);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Insert 5 entries (rowids 1-5)
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(1, 'p', 'm', X'00000000', 1), "
+        "(2, 'p', 'm', X'00000000', 1), "
+        "(3, 'p', 'm', X'00000000', 1), "
+        "(4, 'p', 'm', X'00000000', 1), "
+        "(5, 'p', 'm', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify 5 entries before any sync triggers eviction
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 5);
+
+    // Now manually call memory_cache_clear to clear all, then re-insert within limit
+    rc = exec_get_int(db, "SELECT memory_cache_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Insert exactly 3 (at limit)
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(10, 'p', 'm', X'00000000', 1), "
+        "(11, 'p', 'm', X'00000000', 1), "
+        "(12, 'p', 'm', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 3);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_cache_no_eviction_when_unlimited) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Default cache_max_entries is 0 (no limit)
+    // Insert many entries, none should be evicted
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
+        "(1, 'p', 'm', X'00000000', 1), "
+        "(2, 'p', 'm', X'00000000', 1), "
+        "(3, 'p', 'm', X'00000000', 1), "
+        "(4, 'p', 'm', X'00000000', 1), "
+        "(5, 'p', 'm', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 5);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_search_oversample_setting) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // Default is 0 (no oversampling)
+    sqlite3_int64 result;
+    int rc = exec_get_int(db, "SELECT memory_set_option('search_oversample', 4);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('search_oversample');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 4);
+
+    // Set back to 0 (no oversampling)
+    rc = exec_get_int(db, "SELECT memory_set_option('search_oversample', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('search_oversample');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_delete_context_with_vault) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -1919,6 +2318,11 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_delete_context_direct);
     RUN_TEST(sqlite_memory_clear_direct);
 
+    printf("\nSync tests:\n");
+    RUN_TEST(sqlite_sync_directory_removes_deleted);
+    RUN_TEST(sqlite_sync_directory_removes_all_deleted);
+    RUN_TEST(sqlite_sync_directory_skips_unchanged);
+
     printf("\nSQLite extension advanced tests:\n");
     RUN_TEST(sqlite_memory_delete_with_vault_data);
     RUN_TEST(sqlite_memory_delete_twice);
@@ -1929,6 +2333,19 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_created_at_valid_range);
     RUN_TEST(sqlite_memory_clear_with_vault_fts);
     RUN_TEST(sqlite_memory_delete_context_with_vault);
+
+    printf("\nEmbedding cache tests:\n");
+    RUN_TEST(sqlite_cache_table_exists);
+    RUN_TEST(sqlite_cache_clear_empty);
+    RUN_TEST(sqlite_cache_clear_with_data);
+    RUN_TEST(sqlite_cache_clear_by_provider_model);
+    RUN_TEST(sqlite_cache_setting_default);
+    RUN_TEST(sqlite_cache_max_entries_setting);
+    RUN_TEST(sqlite_cache_eviction);
+    RUN_TEST(sqlite_cache_no_eviction_when_unlimited);
+
+    printf("\nSearch oversampling tests:\n");
+    RUN_TEST(sqlite_search_oversample_setting);
 #endif
 
     printf("\n=== Results ===\n");

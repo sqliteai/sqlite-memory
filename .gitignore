@@ -47,12 +47,7 @@ yarn-error.log*
 
 # System
 .DS_Store
-Thumbs.db
-CLAUDE.md
-
-# Dart/Flutter
-.dart_tool/
-pubspec.lock
-.flutter-plugins
-.flutter-plugins-dependencies
-packages/flutter/native_libraries/
+test/unittest.dSYM/Contents/Info.plist
+test/unittest.dSYM/Contents/Resources/DWARF/unittest
+test/unittest.dSYM/Contents/Resources/Relocations/aarch64/unittest.yml
+/build

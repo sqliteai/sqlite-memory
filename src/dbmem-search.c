@@ -584,10 +584,14 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
         }
     }
     
+    // compute fetch count (oversampling)
+    int oversample = dbmem_context_search_oversample(ctx);
+    int fetch_count = (oversample > 0) ? max_results * oversample : max_results;
+
     // allocate internal cursor buffer
-    int rc = vMemorySearchCursorAllocate(c, max_results, perform_fts);
+    int rc = vMemorySearchCursorAllocate(c, fetch_count, perform_fts);
     if (rc != SQLITE_OK) return SQLITE_NOMEM;
-    
+
     // perform semantic search
     // retrieve engine
     bool is_local;
@@ -627,16 +631,16 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     }
     
     // perform search
-    rc = dbmem_semantic_search(db, c, result.embedding, (int)(result.n_embd * sizeof(float)), context, max_results);
+    rc = dbmem_semantic_search(db, c, result.embedding, (int)(result.n_embd * sizeof(float)), context, fetch_count);
     if (rc != 0) {
         sqlvTab->zErrMsg = sqlite3_mprintf("%s", sqlite3_errmsg(db));
         return SQLITE_ERROR;
     }
-    
+
     // perform fts search
     if (perform_fts) {
         // in case of FTS error ignore its contribution
-        rc = dbmem_fts_search(db, c, query, context, max_results);
+        rc = dbmem_fts_search(db, c, query, context, fetch_count);
         if (rc != SQLITE_OK) perform_fts = false;
     }
     
