@@ -21,8 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ============ Linux x86_64 ============
-          # Makefile defaults to CPU-only (AVX2) on Linux x86_64
           - os: ubuntu-22.04
             arch: x86_64
             name: linux
@@ -38,8 +36,6 @@ jobs:
             name: linux
             variant: full
 
-          # ============ Linux arm64 ============
-          # Makefile defaults to CPU-only (armv8.2-a) on Linux arm64
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux
@@ -55,7 +51,6 @@ jobs:
             name: linux
             variant: full
 
-          # ============ Linux musl x86_64 ============
           - os: ubuntu-22.04
             arch: x86_64
             name: linux-musl
@@ -74,7 +69,6 @@ jobs:
             variant: full
             container: alpine:latest
 
-          # ============ Linux musl arm64 ============
           - os: ubuntu-22.04-arm
             arch: arm64
             name: linux-musl
@@ -90,8 +84,6 @@ jobs:
             name: linux-musl
             variant: full
 
-          # ============ macOS (universal) ============
-          # Makefile defaults to Metal + Accelerate + BLAS on macOS
           - os: macos-15
             name: macos
             variant: remote
@@ -104,7 +96,6 @@ jobs:
             name: macos
             variant: full
 
-          # ============ macOS x86_64 ============
           - os: macos-15
             arch: x86_64
             name: macos
@@ -124,7 +115,6 @@ jobs:
             make: ARCH=x86_64
             skip_test: true
 
-          # ============ macOS arm64 ============
           - os: macos-15
             arch: arm64
             name: macos
@@ -141,8 +131,6 @@ jobs:
             variant: full
             make: ARCH=arm64
 
-          # ============ Windows x86_64 ============
-          # Makefile defaults to CPU-only (AVX2) on Windows
           - os: windows-2022
             arch: x86_64
             name: windows
@@ -158,8 +146,6 @@ jobs:
             name: windows
             variant: full
 
-          # ============ Android arm64-v8a ============
-          # Makefile defaults to CPU-only on Android
           - os: ubuntu-22.04
             arch: arm64-v8a
             name: android
@@ -179,7 +165,7 @@ jobs:
             make: PLATFORM=android ARCH=arm64-v8a
             skip_test: true
 
-          # ============ Android armeabi-v7a (remote only - llama.cpp not well supported) ============
+          # armeabi-v7a: remote only (llama.cpp not well supported)
           - os: ubuntu-22.04
             arch: armeabi-v7a
             name: android
@@ -187,7 +173,6 @@ jobs:
             make: PLATFORM=android ARCH=armeabi-v7a OMIT_LOCAL_ENGINE=1
             skip_test: true
 
-          # ============ Android x86_64 ============
           - os: ubuntu-22.04
             arch: x86_64
             name: android
@@ -207,8 +192,6 @@ jobs:
             make: PLATFORM=android ARCH=x86_64
             sqlite-amalgamation-zip: https://sqlite.org/2025/sqlite-amalgamation-3490100.zip
 
-          # ============ iOS ============
-          # Makefile defaults to Metal + Accelerate + BLAS on iOS
           - os: macos-15
             name: ios
             variant: remote
@@ -225,8 +208,6 @@ jobs:
             make: PLATFORM=ios
             skip_test: true
 
-          # ============ iOS Simulator ============
-          # Makefile defaults to Metal + Accelerate + BLAS on iOS Simulator
           - os: macos-15
             name: ios-sim
             variant: remote
@@ -243,13 +224,11 @@ jobs:
             make: PLATFORM=ios-sim
             skip_test: true
 
-          # ============ Apple XCFramework (all 3 variants) ============
           - os: macos-15
             name: apple-xcframework
             make: xcframework
             skip_test: true
 
-          # ============ Android AAR (all 3 variants) ============
           - os: ubuntu-22.04
             name: android-aar
             make: aar
@@ -358,19 +337,17 @@ jobs:
       - name: android setup test environment
         if: matrix.name == 'android' && matrix.arch == 'x86_64'
         run: |
-
           echo "::group::enable kvm group perms"
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           echo "::endgroup::"
 
-          echo "::group::download and build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
+          echo "::group::build sqlite3 without SQLITE_OMIT_LOAD_EXTENSION"
           curl -O ${{ matrix.sqlite-amalgamation-zip }}
           unzip sqlite-amalgamation-*.zip
           export ${{ matrix.make }}
           $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.arch }}-linux-android26-clang sqlite-amalgamation-*/shell.c sqlite-amalgamation-*/sqlite3.c -o sqlite3 -ldl
-          # remove unused folders to save up space
           rm -rf sqlite-amalgamation-*.zip sqlite-amalgamation-*
           echo "::endgroup::"
 
@@ -441,12 +418,10 @@ jobs:
             if [ -d "$folder" ]; then
               name=$(basename "$folder")
               if [[ "$name" == "memory-apple-xcframework" ]]; then
-                # XCFramework has 3 variants: memory-remote, memory-local, memory-full
                 for variant in remote local full; do
                   (cd "$folder" && zip -rq "../../memory-apple-xcframework-${variant}-${VERSION}.zip" memory-${variant}.xcframework)
                 done
               elif [[ "$name" == "memory-android-aar" ]]; then
-                # AAR has all variants bundled in one file
                 cp "$folder"/*.aar "${name}-${VERSION}.aar"
               else
                 tar -czf "${name}-${VERSION}.tar.gz" -C "$folder" .
@@ -463,7 +438,6 @@ jobs:
             LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/${{ github.repository }}/releases/latest)
             LATEST=$(echo "$LATEST_RELEASE" | jq -r '.name')
 
-            # Check artifact sizes against previous release
             if [ -n "$LATEST" ] && [ "$LATEST" != "null" ]; then
               echo "Checking artifact sizes against previous release: $LATEST"
               FAILED=0
@@ -473,13 +447,8 @@ jobs:
                   continue
                 fi
 
-                # Get current artifact size
                 NEW_SIZE=$(stat -c%s "$artifact" 2>/dev/null || stat -f%z "$artifact")
-
-                # Get artifact name for previous release
                 ARTIFACT_NAME=$(echo "$artifact" | sed "s/${VERSION}/${LATEST}/")
-
-                # Get previous artifact size from GitHub API
                 OLD_SIZE=$(echo "$LATEST_RELEASE" | jq -r ".assets[] | select(.name == \"$(basename "$ARTIFACT_NAME")\") | .size")
 
                 if [ -z "$OLD_SIZE" ] || [ "$OLD_SIZE" = "null" ]; then
@@ -487,12 +456,9 @@ jobs:
                   continue
                 fi
 
-                # Calculate percentage increase
                 INCREASE=$(awk "BEGIN {printf \"%.2f\", (($NEW_SIZE - $OLD_SIZE) / $OLD_SIZE) * 100}")
-
                 echo "📦 $artifact: $OLD_SIZE → $NEW_SIZE bytes (${INCREASE}% change)"
 
-                # Check if increase is more than 5%
                 if (( $(echo "$INCREASE > 5" | bc -l) )); then
                   if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
                     echo "⚠️  WARNING: $artifact size increased by ${INCREASE}% (limit: 5%)"

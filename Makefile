@@ -5,26 +5,14 @@
 OMIT_LOCAL_ENGINE  ?= 0
 OMIT_REMOTE_ENGINE ?= 0
 OMIT_IO            ?= 0
-
-# llama.cpp cmake options (set via command line: make LLAMA="-DGGML_METAL=ON ...")
-# Common options for different platforms:
-#   macOS:       LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple"
-#   Linux CPU:   LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON"
-#   Linux ARM:   LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_CPU_ARM_ARCH=armv8.2-a"
-#   Linux GPU:   LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_VULKAN=ON -DGGML_OPENCL=ON"
-#   Windows CPU: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_AVX2=ON"
-#   Windows GPU: LLAMA="-DGGML_NATIVE=OFF -DGGML_CPU=ON -DGGML_VULKAN=ON -DGGML_OPENCL=ON"
 LLAMA ?=
 
-# Platform detection (can be overridden: make PLATFORM=android ARCH=arm64-v8a)
 PLATFORM ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 ARCH     ?= $(shell uname -m)
 
-# Normalize platform names
 ifeq ($(PLATFORM),darwin)
     PLATFORM := macos
 endif
-# Handle MINGW/MSYS detection (Git Bash, MSYS2, etc.)
 ifneq (,$(findstring mingw,$(PLATFORM)))
     PLATFORM := windows
 endif
@@ -32,7 +20,6 @@ ifneq (,$(findstring msys,$(PLATFORM)))
     PLATFORM := windows
 endif
 
-# Directories
 SRC_DIR     := src
 BUILD_DIR   := build
 DIST_DIR    := dist
@@ -40,43 +27,34 @@ LLAMA_DIR   := modules/llama.cpp
 LLAMA_BUILD := $(LLAMA_DIR)/build
 TEST_DIR    := test
 
-# Version from header
 VERSION := $(shell grep 'SQLITE_DBMEMORY_VERSION' $(SRC_DIR)/sqlite-memory.h | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
-# CPU count for parallel builds
 CPUS := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 MAKEFLAGS += -j$(CPUS)
 
-# Compiler settings (default)
 CC          ?= clang
 CXX         ?= clang++
 CFLAGS      := -Wall -Wextra -O2 -fPIC
 CXXFLAGS    := -Wall -Wextra -O2 -fPIC -std=c++17
 DEFINES     :=
 
-# Include paths
 INCLUDES    := -I$(SRC_DIR)
 
-# Base source files (always compiled)
 C_SOURCES   := $(SRC_DIR)/sqlite-memory.c \
                $(SRC_DIR)/dbmem-utils.c \
                $(SRC_DIR)/dbmem-parser.c \
                $(SRC_DIR)/dbmem-search.c \
                $(SRC_DIR)/md4c.c
 
-# Output filename
 OUTPUT_NAME := memory
 
-# Platform-specific settings
 ifeq ($(PLATFORM),macos)
     EXT := dylib
     FRAMEWORKS := -framework Security
     LDFLAGS := -dynamiclib $(FRAMEWORKS)
-    # Homebrew SQLite for SQLITE_ENABLE_LOAD_EXTENSION support
     INCLUDES += -I/opt/homebrew/include -I/usr/local/include
     TEST_LDFLAGS := -L/opt/homebrew/lib -L/usr/local/lib -lsqlite3
 
-    # Architecture support
     ifeq ($(ARCH),x86_64)
         CFLAGS += -arch x86_64
         LDFLAGS += -arch x86_64
@@ -84,7 +62,6 @@ ifeq ($(PLATFORM),macos)
         CFLAGS += -arch arm64
         LDFLAGS += -arch arm64
     else
-        # Universal binary (default on macOS)
         CFLAGS += -arch arm64 -arch x86_64
         LDFLAGS += -arch arm64 -arch x86_64
     endif
@@ -108,14 +85,12 @@ else ifeq ($(PLATFORM),android)
     EXT := so
     OMIT_IO := 1
 
-    # Android NDK setup
     NDK_HOST := $(shell uname -s | tr '[:upper:]' '[:lower:]')-x86_64
     ifeq ($(NDK_HOST),darwin-x86_64)
         NDK_HOST := darwin-x86_64
     endif
     TOOLCHAIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(NDK_HOST)
 
-    # Normalize ARCH for toolchain
     ANDROID_ARCH := $(ARCH)
     ifeq ($(ARCH),arm64-v8a)
         ANDROID_ARCH := aarch64
@@ -152,7 +127,6 @@ else ifeq ($(PLATFORM),ios-sim)
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 -framework Security
 endif
 
-# Base llama.cpp cmake options (minimal build - no curl, httplib, server, rpc)
 LLAMA_OPTIONS := $(LLAMA) \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
@@ -164,23 +138,18 @@ LLAMA_OPTIONS := $(LLAMA) \
     -DLLAMA_BUILD_SERVER=OFF \
     -DGGML_RPC=OFF
 
-# Conditional: Local embedding engine (llama.cpp)
 ifeq ($(OMIT_LOCAL_ENGINE),0)
-    # Include llama.cpp
     INCLUDES += -I$(LLAMA_DIR)/include -I$(LLAMA_DIR)/ggml/include
     C_SOURCES += $(SRC_DIR)/dbmem-lembed.c
 
-    # llama.cpp static libraries (base set)
     LLAMA_LIBS := $(LLAMA_BUILD)/src/libllama.a \
                   $(LLAMA_BUILD)/ggml/src/libggml.a \
                   $(LLAMA_BUILD)/ggml/src/libggml-base.a \
                   $(LLAMA_BUILD)/ggml/src/libggml-cpu.a \
                   $(LLAMA_BUILD)/common/libcommon.a
 
-    # Platform-specific llama.cpp settings
     ifeq ($(PLATFORM),macos)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-        # Add Metal and BLAS libraries for macOS (cmake auto-detects and builds these)
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
         ifeq ($(ARCH),x86_64)
@@ -201,10 +170,10 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     else ifeq ($(PLATFORM),linux)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     else ifeq ($(PLATFORM),windows)
-        # Target Windows 7+ (0x0601) - llama.cpp core doesn't need newer APIs
+        # Target Windows 7+ (0x0601)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0601"
         LDFLAGS := -shared -lbcrypt -static-libgcc -Wl,--push-state,-Bstatic,-lstdc++,-lwinpthread,--pop-state
-        # Windows: use cmake --install paths
+        # Windows: Ninja puts libs in different locations, use cmake --install
         GGML_PREFIX := $(BUILD_DIR)/ggml
         LLAMA_LIBS := $(GGML_PREFIX)/lib/libllama.a \
                       $(GGML_PREFIX)/lib/ggml.a \
@@ -212,7 +181,6 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
                       $(GGML_PREFIX)/lib/ggml-cpu.a \
                       $(LLAMA_BUILD)/common/libcommon.a
     else ifeq ($(PLATFORM),android)
-        # Android NDK cmake toolchain
         ANDROID_OPTIONS := -DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=$(ARCH) \
             -DANDROID_PLATFORM=android-26 \
@@ -226,7 +194,6 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         LLAMA_OPTIONS += $(ANDROID_OPTIONS)
     else ifeq ($(PLATFORM),ios)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
-        # Add Metal and BLAS libraries for iOS
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
         LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0 \
@@ -234,7 +201,6 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
             -ldl -lpthread -lm -headerpad_max_install_names
     else ifeq ($(PLATFORM),ios-sim)
         LLAMA_OPTIONS += -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
-        # Add Metal and BLAS libraries for iOS simulator
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a
         LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 \
@@ -242,7 +208,6 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
             -ldl -lpthread -lm -headerpad_max_install_names
     endif
 
-    # Backend-specific libraries (detected from LLAMA cmake flags for explicit overrides)
     ifneq (,$(findstring GGML_VULKAN=ON,$(LLAMA)))
         LLAMA_LIBS += $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a
         ifeq ($(PLATFORM),windows)
@@ -264,46 +229,38 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         LDFLAGS += -lOpenCL
     endif
 
-    # Use C++ linker when linking with llama.cpp
     LINKER := $(CXX)
     BUILD_DEPS := llama
 else
-    # Omit local engine
     DEFINES += -DDBMEM_OMIT_LOCAL_ENGINE
     LLAMA_LIBS :=
     LINKER := $(CC)
     BUILD_DEPS :=
 endif
 
-# Conditional: Remote embedding engine
 ifeq ($(OMIT_REMOTE_ENGINE),0)
     C_SOURCES += $(SRC_DIR)/dbmem-rembed.c
 else
     DEFINES += -DDBMEM_OMIT_REMOTE_ENGINE
 endif
 
-# Conditional: File I/O
 ifeq ($(OMIT_IO),1)
     DEFINES += -DDBMEM_OMIT_IO
 endif
 
-# Object files
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
 
-# Output
 TARGET := $(DIST_DIR)/$(OUTPUT_NAME).$(EXT)
 
-# Default target
 .PHONY: all
 all: extension
 
 .PHONY: extension
 extension: $(BUILD_DEPS) $(TARGET)
 
-# Build llama.cpp (only if not omitted)
 .PHONY: llama
 ifeq ($(PLATFORM),windows)
-# Windows: use cmake --install for consistent library paths
+# Windows: Ninja puts libs in different locations, use cmake --install for consistent paths
 llama: $(GGML_PREFIX)/lib/libllama.a
 
 $(GGML_PREFIX)/lib/libllama.a:
@@ -314,13 +271,11 @@ $(GGML_PREFIX)/lib/libllama.a:
 	cmake --install $(LLAMA_BUILD) --prefix $(GGML_PREFIX)
 	@echo "llama.cpp build complete"
 
-# Windows LLAMA_LIBS dependencies
 $(GGML_PREFIX)/lib/ggml.a $(GGML_PREFIX)/lib/ggml-base.a $(GGML_PREFIX)/lib/ggml-cpu.a: $(GGML_PREFIX)/lib/libllama.a
 	@:
 $(LLAMA_BUILD)/common/libcommon.a: $(GGML_PREFIX)/lib/libllama.a
 	@:
 else
-# Unix: use build directory paths directly
 llama: $(LLAMA_BUILD)/src/libllama.a
 
 $(LLAMA_BUILD)/src/libllama.a:
@@ -330,30 +285,25 @@ $(LLAMA_BUILD)/src/libllama.a:
 	cmake --build $(LLAMA_BUILD) --config Release -j$(CPUS)
 	@echo "llama.cpp build complete"
 
-# All LLAMA_LIBS are built by the same cmake command as libllama.a
 $(LLAMA_BUILD)/ggml/src/libggml.a $(LLAMA_BUILD)/ggml/src/libggml-base.a $(LLAMA_BUILD)/ggml/src/libggml-cpu.a $(LLAMA_BUILD)/common/libcommon.a $(LLAMA_BUILD)/ggml/src/ggml-metal/libggml-metal.a $(LLAMA_BUILD)/ggml/src/ggml-blas/libggml-blas.a $(LLAMA_BUILD)/ggml/src/ggml-vulkan/libggml-vulkan.a $(LLAMA_BUILD)/ggml/src/ggml-opencl/libggml-opencl.a: $(LLAMA_BUILD)/src/libllama.a
 	@:
 endif
 
-# Create directories
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
 $(DIST_DIR):
 	@mkdir -p $(DIST_DIR)
 
-# Compile C sources to object files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) -c $< -o $@
 
-# Link the extension
 $(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) | $(DIST_DIR)
 	@echo "Linking $(TARGET)..."
 	@$(LINKER) $(C_OBJECTS) $(LLAMA_LIBS) $(LDFLAGS) -o $(TARGET)
 	@echo "Build complete: $(TARGET)"
 
-# Build and run tests
 .PHONY: test
 test: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/unittest
 	@echo "Running unit tests..."
@@ -366,10 +316,9 @@ endif
 	@sqlite3 :memory: ".load $(TARGET)" "SELECT 'memory_version: ' || memory_version();"
 	@echo "Extension loading test passed!"
 
-# Unit test needs SQLITE_CORE to use direct SQLite calls (not extension API)
+# SQLITE_CORE needed to use direct SQLite calls instead of extension API
 TEST_DEFINES := -DSQLITE_CORE
 
-# Test-specific link flags (includes all frameworks/libs needed for llama.cpp)
 TEST_LINK_EXTRAS :=
 ifeq ($(OMIT_LOCAL_ENGINE),0)
     ifeq ($(PLATFORM),macos)
@@ -377,17 +326,14 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     endif
 endif
 
-# Compile test sources with SQLITE_CORE
 $(BUILD_DIR)/unittest.o: $(TEST_DIR)/unittest.c | $(BUILD_DIR)
 	@echo "Compiling unittest.c..."
 	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
 
-# Compile source files for test with SQLITE_CORE
 $(BUILD_DIR)/test-%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $< (for test)..."
 	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
 
-# Test object files (recompiled with SQLITE_CORE)
 TEST_C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/test-%.o,$(C_SOURCES))
 
 $(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(LLAMA_LIBS) | $(BUILD_DIR)
@@ -396,41 +342,32 @@ $(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(LLAMA_LIBS) |
 		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
 		-o $@
 
-# Build without local engine (remote-only builds)
 .PHONY: remote
 remote:
 	@$(MAKE) OMIT_LOCAL_ENGINE=1 extension
 
-# Build without remote engine (local-only builds)
 .PHONY: local
 local:
 	@$(MAKE) OMIT_REMOTE_ENGINE=1 extension
 
-# Build without file I/O (for WASM)
 .PHONY: wasm
 wasm:
 	@$(MAKE) OMIT_LOCAL_ENGINE=1 OMIT_IO=1 extension
 
-# Print version
 .PHONY: version
 version:
 	@echo $(VERSION)
 
-# Clean build artifacts
 .PHONY: clean
 clean:
 	@echo "Cleaning build directory..."
 	@rm -rf $(BUILD_DIR)
 	@rm -rf $(DIST_DIR)
 
-# Clean everything including llama.cpp build
 .PHONY: distclean
 distclean: clean
 	@echo "Cleaning llama.cpp build..."
 	@rm -rf $(LLAMA_BUILD)
-
-# ============ XCFramework (Apple platforms) ============
-# Builds 3 separate XCFrameworks: memory-remote, memory-local, memory-full
 
 define PLIST
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>\
@@ -470,7 +407,6 @@ LIB_PREFIXES = ios ios-sim macos
 FMWK_NAMES = ios-arm64 ios-arm64_x86_64-simulator macos-arm64_x86_64
 XCFRAMEWORK_LLAMA = LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple"
 
-# Helper function to create xcframework from 3 dylibs
 define create_xcframework
 	@$(foreach i,1 2 3,\
 		prefix=$(word $(i),$(LIB_PREFIXES)); \
@@ -489,7 +425,6 @@ endef
 
 .PHONY: xcframework
 xcframework:
-	@# Build remote variant (no llama.cpp) - use rm -rf build to preserve dist between builds
 	MAKEFLAGS= $(MAKE) distclean && MAKEFLAGS= $(MAKE) PLATFORM=ios OMIT_LOCAL_ENGINE=1 && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_remote.dylib && \
 		rm -rf $(BUILD_DIR) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim OMIT_LOCAL_ENGINE=1 && \
@@ -497,7 +432,6 @@ xcframework:
 		rm -rf $(BUILD_DIR) && MAKEFLAGS= $(MAKE) PLATFORM=macos OMIT_LOCAL_ENGINE=1 && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_remote.dylib
 	$(call create_xcframework,_remote,memory-remote)
-	@# Build local variant (llama.cpp only) - need to clear llama.cpp build between platforms
 	rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_local.dylib && \
 		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
@@ -505,7 +439,6 @@ xcframework:
 		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=macos OMIT_REMOTE_ENGINE=1 $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_local.dylib
 	$(call create_xcframework,_local,memory-local)
-	@# Build full variant (both) - need to clear llama.cpp build between platforms
 	rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios $(XCFRAMEWORK_LLAMA) && \
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/ios_full.dylib && \
 		rm -rf $(BUILD_DIR) $(LLAMA_BUILD) && MAKEFLAGS= $(MAKE) PLATFORM=ios-sim $(XCFRAMEWORK_LLAMA) && \
@@ -514,35 +447,27 @@ xcframework:
 		mv $(DIST_DIR)/memory.dylib $(DIST_DIR)/macos_full.dylib
 	$(call create_xcframework,_full,memory-full)
 
-# ============ Android AAR ============
-# Builds all 3 variants (remote, local, full) for each architecture
-
 AAR_ARM = packages/android/src/main/jniLibs/arm64-v8a/
 AAR_X86 = packages/android/src/main/jniLibs/x86_64/
 
 .PHONY: aar
 aar:
 	mkdir -p $(AAR_ARM) $(AAR_X86)
-	# Build remote variant (no llama.cpp)
 	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=arm64-v8a OMIT_LOCAL_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_ARM)/memory_remote.so
 	$(MAKE) clean && $(MAKE) PLATFORM=android ARCH=x86_64 OMIT_LOCAL_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_X86)/memory_remote.so
-	# Build local variant (llama.cpp only)
 	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=arm64-v8a OMIT_REMOTE_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_ARM)/memory_local.so
 	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=x86_64 OMIT_REMOTE_ENGINE=1
 	mv $(DIST_DIR)/memory.so $(AAR_X86)/memory_local.so
-	# Build full variant (both)
 	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=arm64-v8a
 	mv $(DIST_DIR)/memory.so $(AAR_ARM)/memory_full.so
 	$(MAKE) distclean && $(MAKE) PLATFORM=android ARCH=x86_64
 	mv $(DIST_DIR)/memory.so $(AAR_X86)/memory_full.so
-	# Build AAR
 	cd packages/android && ./gradlew clean assembleRelease
 	cp packages/android/build/outputs/aar/android-release.aar $(DIST_DIR)/memory.aar
 
-# Install to system (macOS/Linux)
 .PHONY: install
 install: $(TARGET)
 	@echo "Installing to /usr/local/lib..."
@@ -550,7 +475,6 @@ install: $(TARGET)
 	@install -m 755 $(TARGET) /usr/local/lib/
 	@echo "Installed: /usr/local/lib/$(OUTPUT_NAME).$(EXT)"
 
-# Show help
 .PHONY: help
 help:
 	@echo "sqlite-memory build system"
@@ -596,13 +520,11 @@ help:
 	@echo "  OMIT_REMOTE_ENGINE=$(OMIT_REMOTE_ENGINE)"
 	@echo "  OMIT_IO=$(OMIT_IO)"
 
-# Debug build
 .PHONY: debug
 debug: CFLAGS += -g -O0 -DENABLE_DBMEM_DEBUG=1
 debug: CXXFLAGS += -g -O0
 debug: clean extension
 
-# Print variables (for debugging the Makefile)
 .PHONY: vars
 vars:
 	@echo "VERSION           = $(VERSION)"
