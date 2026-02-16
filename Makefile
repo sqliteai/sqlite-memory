@@ -105,7 +105,7 @@ else ifeq ($(PLATFORM),android)
     endif
 
     LDFLAGS := -shared -static-libstdc++ -llog -Wl,-z,max-page-size=16384
-    TEST_LDFLAGS := -static-libstdc++ -ldl -llog
+    TEST_LDFLAGS := -ldl -llog -lm
 
 else ifeq ($(PLATFORM),ios)
     EXT := dylib
@@ -324,6 +324,8 @@ TEST_LINK_EXTRAS :=
 ifeq ($(OMIT_LOCAL_ENGINE),0)
     ifeq ($(PLATFORM),macos)
         TEST_LINK_EXTRAS := -framework Metal -framework Foundation -framework Accelerate -lobjc
+    else ifeq ($(PLATFORM),android)
+        TEST_LINK_EXTRAS := -static-libstdc++
     endif
 endif
 
