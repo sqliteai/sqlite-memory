@@ -346,6 +346,7 @@ jobs:
           echo "::group::download sqlite3 amalgamation"
           curl -O ${{ matrix.sqlite-amalgamation-zip }}
           unzip sqlite-amalgamation-*.zip
+          rm sqlite-amalgamation-*.zip
           SQLITE_DIR=$(ls -d sqlite-amalgamation-*)
           echo "::endgroup::"
 
