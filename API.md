@@ -114,6 +114,7 @@ Configures the embedding model to use.
 - Remote embedding requires a free API key from [vectors.space](https://vectors.space) (set via `memory_set_apikey`)
 - Settings are persisted in `dbmem_settings` table
 - For local models, the embedding engine is initialized immediately
+- **Automatic reindex**: If a model was previously configured and the new provider/model differs, all existing content is automatically re-embedded with the new model. File-based entries are re-read from disk; text-based entries are re-embedded from stored content. Errors on individual entries are silently skipped (best-effort)
 
 **Example:**
 ```sql

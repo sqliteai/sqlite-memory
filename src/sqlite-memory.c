@@ -859,6 +859,8 @@ static void dbmem_version (sqlite3_context *context, int argc, sqlite3_value **a
     sqlite3_result_text(context, SQLITE_DBMEMORY_VERSION, -1, NULL);
 }
 
+static int dbmem_reindex(dbmem_context *ctx);
+
 static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // 2 TEXT arguments: provider and model
     
@@ -877,7 +879,14 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
-    
+
+    // detect model change (only if a model was previously configured)
+    bool model_changed = false;
+    if (ctx->provider && ctx->model) {
+        model_changed = (strcasecmp(ctx->provider, provider) != 0 ||
+                         strcasecmp(ctx->model, model) != 0);
+    }
+
     bool is_local_provider = (strcasecmp(provider, DBMEM_LOCAL_PROVIDER) == 0);
     #ifdef DBMEM_OMIT_LOCAL_ENGINE
     if (is_local_provider) {
@@ -942,7 +951,12 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         dbmem_settings_sync(ctx, DBMEM_SETTINGS_KEY_PROVIDER, argv[0]);
         dbmem_settings_sync(ctx, DBMEM_SETTINGS_KEY_MODEL, argv[1]);
     }
-    
+
+    // reindex all content if the model changed
+    if (model_changed && rc == SQLITE_OK) {
+        rc = dbmem_reindex(ctx);
+    }
+
     (rc == SQLITE_OK) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, sqlite3_errmsg(db), -1);
 }
 
@@ -1290,6 +1304,57 @@ static int dbmem_process_file (dbmem_context *ctx, const char *path) {
     dbmem_free(buffer);
     
     DEBUG_DBMEM("%*d\t%s", 4, (int)ctx->counter, path);
+    return rc;
+}
+
+static int dbmem_reindex (dbmem_context *ctx) {
+    sqlite3 *db = ctx->db;
+    int rc = SQLITE_OK;
+
+    // copy all content to a temp table
+    rc = sqlite3_exec(db, "CREATE TEMP TABLE dbmem_reindex AS SELECT path, value, context FROM dbmem_content;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    // clear all indexed data
+    if (fts5_is_available) {
+        sqlite3_exec(db, "DELETE FROM dbmem_vault_fts;", NULL, NULL, NULL);
+    }
+    sqlite3_exec(db, "DELETE FROM dbmem_vault;", NULL, NULL, NULL);
+    sqlite3_exec(db, "DELETE FROM dbmem_content;", NULL, NULL, NULL);
+
+    // reset dimension so the new model's dimension is auto-detected
+    ctx->dimension = 0;
+    ctx->dimension_saved = false;
+    ctx->vector_extension_available = false;
+
+    // iterate temp table one row at a time
+    sqlite3_stmt *vm = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT path, value, context FROM dbmem_reindex;", -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    while (sqlite3_step(vm) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(vm, 0);
+        const char *value = (const char *)sqlite3_column_text(vm, 1);
+        int value_len = sqlite3_column_bytes(vm, 1);
+        const char *context = (const char *)sqlite3_column_text(vm, 2);
+
+        dbmem_context_reset_temp_values(ctx);
+        ctx->context = context;
+
+        if (path && dbmem_file_exists(path)) {
+            dbmem_process_file(ctx, path);
+        } else if (value && value_len > 0) {
+            ctx->path = path;
+            dbmem_process_buffer(ctx, value, value_len);
+        }
+        // else: skip entries that can't be rebuilt
+    }
+
+    rc = SQLITE_OK;
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    sqlite3_exec(db, "DROP TABLE IF EXISTS dbmem_reindex;", NULL, NULL, NULL);
     return rc;
 }
 
