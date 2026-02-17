@@ -83,16 +83,16 @@ SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 -- SELECT memory_set_apikey('your-vectorspace-api-key');
 
 -- Add some knowledge
-SELECT memory_sync_text('SQLite is a C-language library that implements a small, fast,
+SELECT memory_add_text('SQLite is a C-language library that implements a small, fast,
 self-contained, high-reliability, full-featured, SQL database engine. SQLite is the
 most used database engine in the world.', 'sqlite-docs');
 
-SELECT memory_sync_text('Vector databases store data as high-dimensional vectors,
+SELECT memory_add_text('Vector databases store data as high-dimensional vectors,
 enabling similarity search. They are essential for semantic search, recommendation
 systems, and AI applications.', 'concepts');
 
 -- Sync an entire documentation directory
-SELECT memory_sync_directory('/path/to/docs', 'project-docs');
+SELECT memory_add_directory('/path/to/docs', 'project-docs');
 
 -- Search your memory semantically
 SELECT path, snippet, ranking
@@ -124,7 +124,7 @@ conn.execute("SELECT memory_set_model('local', './models/nomic-embed-text-v1.5.Q
 
 # Store conversation context
 def remember(content, context="conversation"):
-    conn.execute("SELECT memory_sync_text(?, ?)", (content, context))
+    conn.execute("SELECT memory_add_text(?, ?)", (content, context))
     conn.commit()
 
 # Retrieve relevant memories
@@ -147,11 +147,11 @@ memories = recall("what's the project timeline")
 
 ## Intelligent Sync
 
-All `memory_sync_*` functions use content-hash change detection to avoid redundant work:
+All `memory_add_*` functions use content-hash change detection to avoid redundant work:
 
-- **`memory_sync_text`** — Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
-- **`memory_sync_file`** — Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped.
-- **`memory_sync_directory`** — Performs a full two-phase sync:
+- **`memory_add_text`** — Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
+- **`memory_add_file`** — Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped.
+- **`memory_add_directory`** — Performs a full two-phase sync:
   1. **Cleanup**: Removes database entries for files that no longer exist on disk
   2. **Scan**: Recursively processes all matching files — adding new ones, replacing modified ones, and skipping unchanged ones
 
@@ -240,7 +240,7 @@ make test
 
 - **Local Engine**: Built-in llama.cpp for on-device embeddings (requires GGUF model)
 - **Remote Engine**: [vectors.space](https://vectors.space) API for cloud embeddings (requires free API key)
-- **File I/O**: `memory_sync_file` and `memory_sync_directory` functions
+- **File I/O**: `memory_add_file` and `memory_add_directory` functions
 
 You can also combine options manually:
 

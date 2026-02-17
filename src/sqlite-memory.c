@@ -56,19 +56,19 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_TEXT_WEIGHT          "text_weight"
 #define DBMEM_SETTINGS_KEY_MIN_SCORE            "min_score"
 #define DBMEM_SETTINGS_KEY_UPDATE_ACCESS        "update_access"
-#define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE     "embedding_cache"
-#define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES   "cache_max_entries"
-#define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE  "search_oversample"
+#define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE      "embedding_cache"
+#define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES    "cache_max_entries"
+#define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE    "search_oversample"
 
 // default values from https://docs.openclaw.ai/concepts/memory
 #define DEFAULT_CHARS_PER_TOKEN                 4       // Approximate number of characters per token (GPT ≈ 4, Claude ≈ 3.5)
-#define DEFAULT_MAX_TOKENS                      400
-#define DEFAULT_OVERLAY_TOKENS                  80
-#define DEFAULT_MAX_SNIPPET_CHARS               700
-#define DEFAULT_MAX_RESULTS                     20
-#define DEFAULT_VECTOR_WEIGHT                   0.5
-#define DEFAULT_TEXT_WEIGHT                     0.5
-#define DEFAULT_MIN_SCORE                       0.7
+#define DEFAULT_MAX_TOKENS                      400     // Maximum tokens per chunk
+#define DEFAULT_OVERLAY_TOKENS                  80      // Token overlap between consecutive chunks
+#define DEFAULT_MAX_SNIPPET_CHARS               700     // Maximum characters for search result snippets
+#define DEFAULT_MAX_RESULTS                     20      // Maximum number of search results
+#define DEFAULT_VECTOR_WEIGHT                   0.6     // Semantic similarity weight in hybrid search scoring
+#define DEFAULT_TEXT_WEIGHT                     0.4     // Full-text match weight in hybrid search scoring
+#define DEFAULT_MIN_SCORE                       0.7     // Minimum score threshold to filter irrelevant results
 
 struct dbmem_context {
     // Database and engine
@@ -1367,10 +1367,10 @@ static int dbmem_scan_callback (const char *path, void *data) {
     return rc;
 }
 
-static void dbmem_sync_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_sync_text expects a parameter of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_text expects a parameter of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -1392,10 +1392,10 @@ static void dbmem_sync_text (sqlite3_context *context, int argc, sqlite3_value *
 }
 
 #ifndef DBMEM_OMIT_IO
-static void dbmem_sync_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_sync_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -1439,10 +1439,10 @@ static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_pa
     sqlite3_free_table(table);
 }
 
-static void dbmem_sync_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_sync_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
         return;
     }
 
@@ -1511,23 +1511,23 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     if (rc != SQLITE_OK) return rc;
     
     #ifndef DBMEM_OMIT_IO
-    rc = sqlite3_create_function_v2(db, "memory_sync_file", 1, SQLITE_UTF8, ctx, dbmem_sync_file, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = sqlite3_create_function_v2(db, "memory_sync_file", 2, SQLITE_UTF8, ctx, dbmem_sync_file, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = sqlite3_create_function_v2(db, "memory_sync_directory", 1, SQLITE_UTF8, ctx, dbmem_sync_directory, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_file", 1, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function_v2(db, "memory_sync_directory", 2, SQLITE_UTF8, ctx, dbmem_sync_directory, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_file", 2, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "memory_add_directory", 1, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "memory_add_directory", 2, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     #endif
     
-    rc = sqlite3_create_function_v2(db, "memory_sync_text", 1, SQLITE_UTF8, ctx, dbmem_sync_text, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_text", 1, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function_v2(db, "memory_sync_text", 2, SQLITE_UTF8, ctx, dbmem_sync_text, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_text", 2, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_function_v2(db, "memory_delete", 1, SQLITE_UTF8, ctx, dbmem_delete, NULL, NULL, NULL);

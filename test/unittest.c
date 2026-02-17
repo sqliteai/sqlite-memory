@@ -1790,7 +1790,7 @@ static int insert_fake_content(sqlite3 *db, sqlite3_int64 hash, const char *path
 }
 
 TEST(sqlite_sync_directory_removes_deleted) {
-    // Test that memory_sync_directory removes entries for files no longer on disk
+    // Test that memory_add_directory removes entries for files no longer on disk
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
@@ -1828,7 +1828,7 @@ TEST(sqlite_sync_directory_removes_deleted) {
 
     // Sync — should remove the entry for gone.md, skip keep.md (hash match)
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_sync_directory('/tmp/dbmem_test_sync_del');", &result);
+    rc = exec_get_int(db, "SELECT memory_add_directory('/tmp/dbmem_test_sync_del');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Only keep.md entry should remain
@@ -1880,7 +1880,7 @@ TEST(sqlite_sync_directory_removes_all_deleted) {
 
     // Sync — all files gone, all entries should be removed
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_sync_directory('/tmp/dbmem_test_sync_allgone');", &result);
+    rc = exec_get_int(db, "SELECT memory_add_directory('/tmp/dbmem_test_sync_allgone');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
@@ -1917,7 +1917,7 @@ TEST(sqlite_sync_directory_skips_unchanged) {
 
     // Sync — file exists with matching hash, should be skipped
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_sync_directory('/tmp/dbmem_test_sync_skip', 'notes');", &result);
+    rc = exec_get_int(db, "SELECT memory_add_directory('/tmp/dbmem_test_sync_skip', 'notes');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Entry still exists unchanged (no duplication)
