@@ -83,7 +83,6 @@ else ifeq ($(PLATFORM),windows)
 
 else ifeq ($(PLATFORM),android)
     EXT := so
-    OMIT_IO := 1
 
     NDK_HOST := $(shell uname -s | tr '[:upper:]' '[:lower:]')-x86_64
     ifeq ($(NDK_HOST),darwin-x86_64)
@@ -109,7 +108,6 @@ else ifeq ($(PLATFORM),android)
 
 else ifeq ($(PLATFORM),ios)
     EXT := dylib
-    OMIT_IO := 1
 
     SDK := $(shell xcrun --sdk iphoneos --show-sdk-path)
     CC := $(shell xcrun --sdk iphoneos -f clang)
@@ -119,7 +117,6 @@ else ifeq ($(PLATFORM),ios)
 
 else ifeq ($(PLATFORM),ios-sim)
     EXT := dylib
-    OMIT_IO := 1
 
     SDK := $(shell xcrun --sdk iphonesimulator --show-sdk-path)
     CC := $(shell xcrun --sdk iphonesimulator -f clang)
