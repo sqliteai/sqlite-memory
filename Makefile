@@ -316,6 +316,9 @@ endif
 
 # SQLITE_CORE needed to use direct SQLite calls instead of extension API
 TEST_DEFINES := -DSQLITE_CORE
+ifeq ($(PLATFORM),android)
+    TEST_DEFINES += -DTEST_TMP_DIR=\"/data/local/tmp\"
+endif
 
 TEST_LINK_EXTRAS :=
 ifeq ($(OMIT_LOCAL_ENGINE),0)
