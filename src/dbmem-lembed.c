@@ -6,6 +6,7 @@
 //
 
 #include "dbmem-embed.h"
+#include "sqlite-memory.h"
 #include "llama.h"
 #include "ggml.h"
 
@@ -13,13 +14,14 @@
 #include <string.h>
 
 struct dbmem_local_engine_t {
+    dbmem_context               *context;
+    
     // Model and context
     struct llama_model          *model;                     // Loaded GGUF model weights and architecture
     struct llama_context        *ctx;                       // Inference context with KV cache and compute buffers
     const struct llama_vocab    *vocab;                     // Tokenizer vocabulary for text-to-token conversion
     enum llama_pooling_type     pooling;                    // Pooling strategy (NONE, MEAN, CLS, LAST, RANK)
     llama_memory_t              mem;                        // KV cache memory handle for clearing between batches
-    char                        err_msg[DBMEM_ERRBUF_SIZE]; // Error message
 
     // Model info
     int                         n_embd;                     // Embedding dimension (e.g., 768 for nomic-embed)
@@ -98,7 +100,7 @@ void dbmem_logger (enum ggml_log_level level, const char *text, void *user_data)
 
 // MARK: -
 
-dbmem_local_engine_t *dbmem_local_engine_init (const char *model_path, char err_msg[DBMEM_ERRBUF_SIZE]) {
+dbmem_local_engine_t *dbmem_local_engine_init (void *ctx, const char *model_path, char err_msg[DBMEM_ERRBUF_SIZE]) {
     dbmem_local_engine_t *engine = (dbmem_local_engine_t *)dbmem_zeroalloc(sizeof(dbmem_local_engine_t));
     if (!engine) return NULL;
     
@@ -203,7 +205,6 @@ bool dbmem_local_engine_warmup (dbmem_local_engine_t *engine) {
 }
 
 int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *text, int text_len, embedding_result_t *result) {
-    engine->err_msg[0] = 0;
     memset(result, 0, sizeof(embedding_result_t));
     if (text_len == -1) text_len = (int)strlen(text);
     if (text_len == 0) return 0;
@@ -211,7 +212,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     // Tokenize
     int n_tokens = llama_tokenize(engine->vocab, text, text_len, engine->tokens, engine->tokens_capacity, true, true);
     if (n_tokens < 0) {
-        snprintf(engine->err_msg, DBMEM_ERRBUF_SIZE, "Tokenization failed (text too long?)");
+        dbmem_context_set_error(engine->context, "Tokenization failed (text too long?)");
         return -1;
     }
 
@@ -241,7 +242,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     // Encode
     int ret = llama_encode(engine->ctx, batch);
     if (ret != 0) {
-        snprintf(engine->err_msg, DBMEM_ERRBUF_SIZE, "llama_encode failed");
+        dbmem_context_set_error(engine->context, "Llama_encode failed");
         return -1;
     }
 
@@ -254,7 +255,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     }
 
     if (!emb_ptr) {
-        snprintf(engine->err_msg, DBMEM_ERRBUF_SIZE, "Failed to get embeddings");
+        dbmem_context_set_error(engine->context, "Failed to get embeddings");
         return -1;
     }
 
@@ -302,6 +303,3 @@ void dbmem_local_engine_free (dbmem_local_engine_t *engine) {
     llama_backend_free();
 }
 
-const char *dbmem_local_errmsg (dbmem_local_engine_t *engine) {
-    return engine->err_msg;
-}

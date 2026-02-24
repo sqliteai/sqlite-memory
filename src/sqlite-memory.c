@@ -668,6 +668,14 @@ const char *dbmem_context_errmsg (dbmem_context *ctx) {
     return ctx->error_msg;
 }
 
+const char *dbmem_context_apikey (dbmem_context *ctx) {
+    return ctx->api_key;
+}
+
+void dbmem_context_set_error (dbmem_context *ctx, const char *str) {
+    snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", str);
+}
+
 // MARK: - Deletion -
 
 static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -883,8 +891,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     // detect model change (only if a model was previously configured)
     bool model_changed = false;
     if (ctx->provider && ctx->model) {
-        model_changed = (strcasecmp(ctx->provider, provider) != 0 ||
-                         strcasecmp(ctx->model, model) != 0);
+        model_changed = (strcasecmp(ctx->provider, provider) != 0 || strcasecmp(ctx->model, model) != 0);
     }
 
     bool is_local_provider = (strcasecmp(provider, DBMEM_LOCAL_PROVIDER) == 0);
@@ -912,7 +919,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
         ctx->l_engine = NULL;
         
-        ctx->l_engine = dbmem_local_engine_init(model, ctx->error_msg);
+        ctx->l_engine = dbmem_local_engine_init(ctx, model, ctx->error_msg);
         if (ctx->l_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
@@ -931,7 +938,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         if (ctx->r_engine) dbmem_remote_engine_free(ctx->r_engine);
         ctx->r_engine = NULL;
         
-        ctx->r_engine = dbmem_remote_engine_init(provider, model, ctx->error_msg);
+        ctx->r_engine = dbmem_remote_engine_init(ctx, provider, model, ctx->error_msg);
         if (ctx->r_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
@@ -1178,11 +1185,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
         if (ctx->is_local) {
         #ifndef DBMEM_OMIT_LOCAL_ENGINE
             rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
-            if (rc != 0) {
-                const char *err = dbmem_local_errmsg(ctx->l_engine);
-                memcpy(ctx->error_msg, err, strlen(err) + 1);
-                return rc;
-            }
+            if (rc != 0) return rc;
         #else
             const char *err = "Local embedding cannot be computed because extension was compiled without local engine support";
             memcpy(ctx->error_msg, err, strlen(err) + 1);
@@ -1193,11 +1196,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
         if (!ctx->is_local) {
         #ifndef DBMEM_OMIT_REMOTE_ENGINE
             rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
-            if (rc != 0) {
-                const char *err = dbmem_remote_errmsg(ctx->r_engine);
-                memcpy(ctx->error_msg, err, strlen(err) + 1);
-                return rc;
-            }
+            if (rc != 0) return rc;
         #else
             const char *err = "Remote embedding cannot be computed because extension was compiled without remote engine support";
             memcpy(ctx->error_msg, err, strlen(err) + 1);

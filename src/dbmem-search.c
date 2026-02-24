@@ -609,7 +609,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     if (is_local) {
         rc = dbmem_local_compute_embedding((dbmem_local_engine_t *)engine, query, (int)strlen(query), &result);
         if (rc != 0) {
-            sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_local_errmsg((dbmem_local_engine_t *)engine));
+            sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_context_errmsg(ctx));
             return SQLITE_ERROR;
         }
     }
@@ -619,7 +619,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     if (!is_local) {
         rc = dbmem_remote_compute_embedding((dbmem_remote_engine_t *)engine, query, (int)strlen(query), &result);
         if (rc != 0) {
-            sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_remote_errmsg((dbmem_remote_engine_t *)engine));
+            sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_context_errmsg(ctx));
             return SQLITE_ERROR;
         }
     }

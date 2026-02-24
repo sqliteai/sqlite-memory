@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define SQLITE_DBMEMORY_VERSION "0.6.0"
+#define SQLITE_DBMEMORY_VERSION "0.7.0"
 
 // public API
 SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
@@ -45,6 +45,8 @@ double dbmem_context_min_score (dbmem_context *ctx);
 bool   dbmem_context_update_access (dbmem_context *ctx);
 int    dbmem_context_search_oversample (dbmem_context *ctx);
 const char *dbmem_context_errmsg (dbmem_context *ctx);
+const char *dbmem_context_apikey (dbmem_context *ctx);
+void   dbmem_context_set_error (dbmem_context *ctx, const char *str);
 
 #ifdef __cplusplus
 }
