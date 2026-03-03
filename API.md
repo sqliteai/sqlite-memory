@@ -32,7 +32,7 @@ sqlite-memory enables semantic search over text content stored in SQLite. It:
 
 ## Sync Behavior
 
-All `memory_sync_*` functions use **content-hash change detection** to avoid redundant embedding computation. Each piece of content is hashed before processing — if the hash already exists in the database, the content is skipped.
+All `memory_add_*` functions use **content-hash change detection** to avoid redundant embedding computation. Each piece of content is hashed before processing — if the hash already exists in the database, the content is skipped.
 
 ### Change Detection
 
@@ -114,6 +114,7 @@ Configures the embedding model to use.
 - Remote embedding requires a free API key from [vectors.space](https://vectors.space) (set via `memory_set_apikey`)
 - Settings are persisted in `dbmem_settings` table
 - For local models, the embedding engine is initialized immediately
+- **Automatic reindex**: If a model was previously configured and the new provider/model differs, all existing content is automatically re-embedded with the new model. File-based entries are re-read from disk; text-based entries are re-embedded from stored content. Errors on individual entries are silently skipped (best-effort)
 
 **Example:**
 ```sql
@@ -200,7 +201,7 @@ SELECT memory_get_option('provider');
 
 ### Memory Management Functions
 
-#### `memory_sync_text(content TEXT [, context TEXT])`
+#### `memory_add_text(content TEXT [, context TEXT])`
 
 Syncs text content to memory. Duplicate content (same hash) is skipped automatically.
 
@@ -222,15 +223,15 @@ Syncs text content to memory. Duplicate content (same hash) is skipped automatic
 **Example:**
 ```sql
 -- Add text without context
-SELECT memory_sync_text('SQLite is a C-language library that implements a small, fast, self-contained SQL database engine.');
+SELECT memory_add_text('SQLite is a C-language library that implements a small, fast, self-contained SQL database engine.');
 
 -- Add text with context
-SELECT memory_sync_text('Important meeting notes from 2024-01-15...', 'meetings');
+SELECT memory_add_text('Important meeting notes from 2024-01-15...', 'meetings');
 ```
 
 ---
 
-#### `memory_sync_file(path TEXT [, context TEXT])`
+#### `memory_add_file(path TEXT [, context TEXT])`
 
 Syncs a file to memory. Unchanged files are skipped; modified files are atomically replaced.
 
@@ -250,13 +251,13 @@ Syncs a file to memory. Unchanged files are skipped; modified files are atomical
 
 **Example:**
 ```sql
-SELECT memory_sync_file('/docs/readme.md');
-SELECT memory_sync_file('/docs/api.md', 'documentation');
+SELECT memory_add_file('/docs/readme.md');
+SELECT memory_add_file('/docs/api.md', 'documentation');
 ```
 
 ---
 
-#### `memory_sync_directory(path TEXT [, context TEXT])`
+#### `memory_add_directory(path TEXT [, context TEXT])`
 
 Synchronizes a directory with memory. Adds new files, reindexes modified files, and removes entries for deleted files.
 
@@ -282,13 +283,13 @@ Synchronizes a directory with memory. Adds new files, reindexes modified files, 
 
 **Example:**
 ```sql
-SELECT memory_sync_directory('/path/to/docs');
+SELECT memory_add_directory('/path/to/docs');
 -- Returns: 42 (number of new files processed)
 
-SELECT memory_sync_directory('/project/notes', 'project-notes');
+SELECT memory_add_directory('/project/notes', 'project-notes');
 
 -- Safe to call again — unchanged files are skipped
-SELECT memory_sync_directory('/path/to/docs');
+SELECT memory_add_directory('/path/to/docs');
 -- Returns: 0 (nothing changed)
 ```
 
@@ -476,7 +477,7 @@ The extension tracks two timestamps for each memory:
 
 ### `created_at`
 
-- Set automatically when content is added via `memory_sync_text`, `memory_sync_file`, or `memory_sync_directory`
+- Set automatically when content is added via `memory_add_text`, `memory_add_file`, or `memory_add_directory`
 - Stored as Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
 - Never updated after initial creation
 
@@ -517,8 +518,8 @@ SELECT memory_set_option('max_tokens', 512);
 SELECT memory_set_option('min_score', 0.75);
 
 -- Add content
-SELECT memory_sync_text('SQLite is a C library that provides a lightweight disk-based database.', 'sqlite-docs');
-SELECT memory_sync_directory('/docs/sqlite', 'sqlite-docs');
+SELECT memory_add_text('SQLite is a C library that provides a lightweight disk-based database.', 'sqlite-docs');
+SELECT memory_add_directory('/docs/sqlite', 'sqlite-docs');
 
 -- Search
 SELECT path, snippet, ranking
@@ -546,9 +547,9 @@ SELECT memory_clear();
 
 ```sql
 -- Add memories with different contexts
-SELECT memory_sync_text('Meeting notes...', 'meetings');
-SELECT memory_sync_text('API documentation...', 'api-docs');
-SELECT memory_sync_text('Tutorial content...', 'tutorials');
+SELECT memory_add_text('Meeting notes...', 'meetings');
+SELECT memory_add_text('API documentation...', 'api-docs');
+SELECT memory_add_text('Tutorial content...', 'tutorials');
 
 -- Search within a context
 SELECT * FROM memory_search
@@ -618,6 +619,6 @@ Errors can be caught using standard SQLite error handling mechanisms.
 
 ```sql
 -- Example error handling in application code
-SELECT memory_sync_text(123);  -- Error: expects TEXT parameter
+SELECT memory_add_text(123);  -- Error: expects TEXT parameter
 SELECT memory_delete('abc');  -- Error: expects INTEGER parameter
 ```

@@ -56,19 +56,19 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_TEXT_WEIGHT          "text_weight"
 #define DBMEM_SETTINGS_KEY_MIN_SCORE            "min_score"
 #define DBMEM_SETTINGS_KEY_UPDATE_ACCESS        "update_access"
-#define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE     "embedding_cache"
-#define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES   "cache_max_entries"
-#define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE  "search_oversample"
+#define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE      "embedding_cache"
+#define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES    "cache_max_entries"
+#define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE    "search_oversample"
 
 // default values from https://docs.openclaw.ai/concepts/memory
 #define DEFAULT_CHARS_PER_TOKEN                 4       // Approximate number of characters per token (GPT ≈ 4, Claude ≈ 3.5)
-#define DEFAULT_MAX_TOKENS                      400
-#define DEFAULT_OVERLAY_TOKENS                  80
-#define DEFAULT_MAX_SNIPPET_CHARS               700
-#define DEFAULT_MAX_RESULTS                     20
-#define DEFAULT_VECTOR_WEIGHT                   0.5
-#define DEFAULT_TEXT_WEIGHT                     0.5
-#define DEFAULT_MIN_SCORE                       0.7
+#define DEFAULT_MAX_TOKENS                      400     // Maximum tokens per chunk
+#define DEFAULT_OVERLAY_TOKENS                  80      // Token overlap between consecutive chunks
+#define DEFAULT_MAX_SNIPPET_CHARS               700     // Maximum characters for search result snippets
+#define DEFAULT_MAX_RESULTS                     20      // Maximum number of search results
+#define DEFAULT_VECTOR_WEIGHT                   0.6     // Semantic similarity weight in hybrid search scoring
+#define DEFAULT_TEXT_WEIGHT                     0.4     // Full-text match weight in hybrid search scoring
+#define DEFAULT_MIN_SCORE                       0.7     // Minimum score threshold to filter irrelevant results
 
 struct dbmem_context {
     // Database and engine
@@ -671,6 +671,14 @@ const char *dbmem_context_errmsg (dbmem_context *ctx) {
     return ctx->error_msg;
 }
 
+const char *dbmem_context_apikey (dbmem_context *ctx) {
+    return ctx->api_key;
+}
+
+void dbmem_context_set_error (dbmem_context *ctx, const char *str) {
+    snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", str);
+}
+
 // MARK: - Deletion -
 
 static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -862,6 +870,8 @@ static void dbmem_version (sqlite3_context *context, int argc, sqlite3_value **a
     sqlite3_result_text(context, SQLITE_DBMEMORY_VERSION, -1, NULL);
 }
 
+static int dbmem_reindex(dbmem_context *ctx);
+
 static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // 2 TEXT arguments: provider and model
     
@@ -880,7 +890,13 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
-    
+
+    // detect model change (only if a model was previously configured)
+    bool model_changed = false;
+    if (ctx->provider && ctx->model) {
+        model_changed = (strcasecmp(ctx->provider, provider) != 0 || strcasecmp(ctx->model, model) != 0);
+    }
+
     bool is_local_provider = (strcasecmp(provider, DBMEM_LOCAL_PROVIDER) == 0);
     #ifdef DBMEM_OMIT_LOCAL_ENGINE
     if (is_local_provider) {
@@ -906,7 +922,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
         ctx->l_engine = NULL;
         
-        ctx->l_engine = dbmem_local_engine_init(model, ctx->error_msg);
+        ctx->l_engine = dbmem_local_engine_init(ctx, model, ctx->error_msg);
         if (ctx->l_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
@@ -925,7 +941,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         if (ctx->r_engine) dbmem_remote_engine_free(ctx->r_engine);
         ctx->r_engine = NULL;
         
-        ctx->r_engine = dbmem_remote_engine_init(provider, model, ctx->error_msg);
+        ctx->r_engine = dbmem_remote_engine_init(ctx, provider, model, ctx->error_msg);
         if (ctx->r_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
@@ -945,7 +961,12 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         dbmem_settings_sync(ctx, DBMEM_SETTINGS_KEY_PROVIDER, argv[0]);
         dbmem_settings_sync(ctx, DBMEM_SETTINGS_KEY_MODEL, argv[1]);
     }
-    
+
+    // reindex all content if the model changed
+    if (model_changed && rc == SQLITE_OK) {
+        rc = dbmem_reindex(ctx);
+    }
+
     (rc == SQLITE_OK) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, sqlite3_errmsg(db), -1);
 }
 
@@ -1167,11 +1188,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
         if (ctx->is_local) {
         #ifndef DBMEM_OMIT_LOCAL_ENGINE
             rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
-            if (rc != 0) {
-                const char *err = dbmem_local_errmsg(ctx->l_engine);
-                memcpy(ctx->error_msg, err, strlen(err) + 1);
-                return rc;
-            }
+            if (rc != 0) return rc;
         #else
             const char *err = "Local embedding cannot be computed because extension was compiled without local engine support";
             memcpy(ctx->error_msg, err, strlen(err) + 1);
@@ -1182,11 +1199,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
         if (!ctx->is_local) {
         #ifndef DBMEM_OMIT_REMOTE_ENGINE
             rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
-            if (rc != 0) {
-                const char *err = dbmem_remote_errmsg(ctx->r_engine);
-                memcpy(ctx->error_msg, err, strlen(err) + 1);
-                return rc;
-            }
+            if (rc != 0) return rc;
         #else
             const char *err = "Remote embedding cannot be computed because extension was compiled without remote engine support";
             memcpy(ctx->error_msg, err, strlen(err) + 1);
@@ -1296,6 +1309,57 @@ static int dbmem_process_file (dbmem_context *ctx, const char *path) {
     return rc;
 }
 
+static int dbmem_reindex (dbmem_context *ctx) {
+    sqlite3 *db = ctx->db;
+    int rc = SQLITE_OK;
+
+    // copy all content to a temp table
+    rc = sqlite3_exec(db, "CREATE TEMP TABLE dbmem_reindex AS SELECT path, value, context FROM dbmem_content;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    // clear all indexed data
+    if (fts5_is_available) {
+        sqlite3_exec(db, "DELETE FROM dbmem_vault_fts;", NULL, NULL, NULL);
+    }
+    sqlite3_exec(db, "DELETE FROM dbmem_vault;", NULL, NULL, NULL);
+    sqlite3_exec(db, "DELETE FROM dbmem_content;", NULL, NULL, NULL);
+
+    // reset dimension so the new model's dimension is auto-detected
+    ctx->dimension = 0;
+    ctx->dimension_saved = false;
+    ctx->vector_extension_available = false;
+
+    // iterate temp table one row at a time
+    sqlite3_stmt *vm = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT path, value, context FROM dbmem_reindex;", -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    while (sqlite3_step(vm) == SQLITE_ROW) {
+        const char *path = (const char *)sqlite3_column_text(vm, 0);
+        const char *value = (const char *)sqlite3_column_text(vm, 1);
+        int value_len = sqlite3_column_bytes(vm, 1);
+        const char *context = (const char *)sqlite3_column_text(vm, 2);
+
+        dbmem_context_reset_temp_values(ctx);
+        ctx->context = context;
+
+        if (path && dbmem_file_exists(path)) {
+            dbmem_process_file(ctx, path);
+        } else if (value && value_len > 0) {
+            ctx->path = path;
+            dbmem_process_buffer(ctx, value, value_len);
+        }
+        // else: skip entries that can't be rebuilt
+    }
+
+    rc = SQLITE_OK;
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    sqlite3_exec(db, "DROP TABLE IF EXISTS dbmem_reindex;", NULL, NULL, NULL);
+    return rc;
+}
+
 static int dbmem_scan_callback (const char *path, void *data) {
     dbmem_context *ctx = (dbmem_context *)data;
     
@@ -1305,10 +1369,10 @@ static int dbmem_scan_callback (const char *path, void *data) {
     return rc;
 }
 
-static void dbmem_sync_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_sync_text expects a parameter of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_text expects a parameter of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -1330,10 +1394,10 @@ static void dbmem_sync_text (sqlite3_context *context, int argc, sqlite3_value *
 }
 
 #ifndef DBMEM_OMIT_IO
-static void dbmem_sync_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_sync_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
@@ -1377,10 +1441,10 @@ static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_pa
     sqlite3_free_table(table);
 }
 
-static void dbmem_sync_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
+static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_sync_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
         return;
     }
 
@@ -1449,23 +1513,23 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     if (rc != SQLITE_OK) return rc;
     
     #ifndef DBMEM_OMIT_IO
-    rc = sqlite3_create_function_v2(db, "memory_sync_file", 1, SQLITE_UTF8, ctx, dbmem_sync_file, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = sqlite3_create_function_v2(db, "memory_sync_file", 2, SQLITE_UTF8, ctx, dbmem_sync_file, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    rc = sqlite3_create_function_v2(db, "memory_sync_directory", 1, SQLITE_UTF8, ctx, dbmem_sync_directory, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_file", 1, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function_v2(db, "memory_sync_directory", 2, SQLITE_UTF8, ctx, dbmem_sync_directory, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_file", 2, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "memory_add_directory", 1, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "memory_add_directory", 2, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     #endif
     
-    rc = sqlite3_create_function_v2(db, "memory_sync_text", 1, SQLITE_UTF8, ctx, dbmem_sync_text, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_text", 1, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function_v2(db, "memory_sync_text", 2, SQLITE_UTF8, ctx, dbmem_sync_text, NULL, NULL, NULL);
+    rc = sqlite3_create_function_v2(db, "memory_add_text", 2, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     rc = sqlite3_create_function_v2(db, "memory_delete", 1, SQLITE_UTF8, ctx, dbmem_delete, NULL, NULL, NULL);
