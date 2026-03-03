@@ -15,6 +15,8 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container && matrix.container || '' }}
+    env:
+      APIKEY: ${{ secrets.APIKEY }}
     name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }} build${{ matrix.skip_test != true && ( matrix.name != 'android' || matrix.arch == 'x86_64' ) && ' + test' || ''}}
     timeout-minutes: 60
     strategy:
@@ -362,6 +364,10 @@ jobs:
           make build/unittest ${{ matrix.make }} SQLITE_AMALGAM=${SQLITE_DIR}/sqlite3.c
           echo "::endgroup::"
 
+          echo "::group::build e2e binary for android"
+          make build/e2e ${{ matrix.make }} SQLITE_AMALGAM=${SQLITE_DIR}/sqlite3.c
+          echo "::endgroup::"
+
       - name: android test sqlite-memory
         if: matrix.name == 'android' && matrix.arch == 'x86_64'
         uses: reactivecircus/android-emulator-runner@v2.34.0
@@ -382,6 +388,14 @@ jobs:
             echo "Testing extension loading..."
             adb shell "sqlite3 :memory: '.load /data/local/tmp/memory.so' 'SELECT memory_version();'"
             echo "Extension loading test passed!"
+            if [ "${{ matrix.variant }}" != "local" ]; then
+              adb push ${{ github.workspace }}/build/e2e /data/local/tmp/
+              adb push ${{ github.workspace }}/build/vector.so /data/local/tmp/
+              adb shell "chmod +x /data/local/tmp/e2e"
+              echo "Running e2e tests..."
+              adb shell "APIKEY=$APIKEY VECTOR_LIB=/data/local/tmp/vector /data/local/tmp/e2e"
+              echo "E2E tests passed!"
+            fi
 
       - name: unix test sqlite-memory
         if: matrix.skip_test != true && matrix.os != 'windows-2022' && matrix.name != 'android'
@@ -391,6 +405,15 @@ jobs:
         if: matrix.skip_test != true && matrix.name == 'windows'
         shell: msys2 {0}
         run: make test ${{ matrix.make && matrix.make || ''}}
+
+      - name: unix e2e sqlite-memory
+        if: matrix.skip_test != true && matrix.variant != 'local' && matrix.os != 'windows-2022' && matrix.name != 'android'
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make e2e ${{ matrix.make && matrix.make || ''}}
+
+      - name: windows e2e sqlite-memory
+        if: matrix.skip_test != true && matrix.variant != 'local' && matrix.name == 'windows'
+        shell: msys2 {0}
+        run: make e2e ${{ matrix.make && matrix.make || ''}}
 
       - uses: actions/upload-artifact@v4.6.2
         if: always()

@@ -396,6 +396,41 @@ $(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_O
 		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
 		-o $@
 
+$(BUILD_DIR)/e2e.o: $(TEST_DIR)/e2e.c | $(BUILD_DIR)
+	@echo "Compiling e2e.c..."
+	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/e2e: $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
+	@echo "Linking e2e..."
+	@$(LINKER) $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
+		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
+		-o $@
+
+VECTOR_PLATFORM ?= $(PLATFORM)
+VECTOR_LIB := $(BUILD_DIR)/vector.$(EXT)
+
+# Detect musl libc (Alpine Linux)
+ifeq ($(PLATFORM),linux)
+    ifeq ($(shell cat /etc/alpine-release 2>/dev/null && echo yes),yes)
+        VECTOR_PLATFORM := linux-musl
+    endif
+endif
+
+$(VECTOR_LIB): | $(BUILD_DIR)
+	@echo "Downloading sqlite-vector for $(VECTOR_PLATFORM)-$(ARCH)..."
+	@VECTOR_TAG=$$(curl -sL https://api.github.com/repos/sqliteai/sqlite-vector/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*: *"\(.*\)".*/\1/') && \
+		curl -sL -o $(BUILD_DIR)/vector.tar.gz \
+			"https://github.com/sqliteai/sqlite-vector/releases/download/$${VECTOR_TAG}/vector-$(VECTOR_PLATFORM)-$(ARCH)-$${VECTOR_TAG}.tar.gz" && \
+		tar -xzf $(BUILD_DIR)/vector.tar.gz -C $(BUILD_DIR) && \
+		rm -f $(BUILD_DIR)/vector.tar.gz
+	@test -f $(VECTOR_LIB) || (echo "Error: $(VECTOR_LIB) not found after download" && exit 1)
+
+.PHONY: e2e
+e2e: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/e2e $(VECTOR_LIB)
+	@echo "Running e2e tests..."
+	@VECTOR_LIB=$(CURDIR)/$(VECTOR_LIB) $(BUILD_DIR)/e2e
+	@echo "E2E tests passed!"
+
 .PHONY: remote
 remote:
 	@$(MAKE) OMIT_LOCAL_ENGINE=1 extension
