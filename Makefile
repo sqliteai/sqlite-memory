@@ -44,6 +44,7 @@ CXX         ?= clang++
 CFLAGS      := -Wall -Wextra -O2 -fPIC
 CXXFLAGS    := -Wall -Wextra -O2 -fPIC -std=c++17
 DEFINES     :=
+STRIP_CMD   ?= @:
 
 INCLUDES    := -I$(SRC_DIR)
 
@@ -61,6 +62,7 @@ ifeq ($(PLATFORM),macos)
     LDFLAGS := -dynamiclib $(FRAMEWORKS)
     INCLUDES += -I/opt/homebrew/include -I/usr/local/include
     TEST_LDFLAGS := -L/opt/homebrew/lib -L/usr/local/lib -lsqlite3
+    STRIP_CMD = strip -x -S $(TARGET)
 
     CURL_SSL_LIBS := -framework CoreFoundation
 
@@ -84,6 +86,7 @@ else ifeq ($(PLATFORM),linux)
     CXX := g++
     LDFLAGS := -shared -lpthread -lm -ldl
     TEST_LDFLAGS := -lsqlite3 -lpthread -lm -ldl
+    STRIP_CMD = strip --strip-unneeded $(TARGET)
     CURL_CONFIG := --with-openssl
     CURL_SSL_LIBS := -lssl -lcrypto
 
@@ -94,6 +97,7 @@ else ifeq ($(PLATFORM),windows)
     LDFLAGS := -shared -static-libgcc -lbcrypt
     OUTPUT_NAME := memory
     TEST_LDFLAGS := -lsqlite3 -lbcrypt
+    STRIP_CMD = strip --strip-unneeded $(TARGET)
     CURL_CONFIG := --with-schannel CFLAGS="-DCURL_STATICLIB"
     CURL_SSL_LIBS := -lcrypt32 -lsecur32 -lws2_32
 
@@ -125,11 +129,13 @@ else ifeq ($(PLATFORM),android)
     CURL_LIB := $(CURL_DIR)/$(PLATFORM)/$(ANDROID_ARCH)/libcurl.a
     MBEDTLS_INSTALL_DIR := $(MBEDTLS_DIR)/$(PLATFORM)/$(ANDROID_ARCH)
     MBEDTLS := $(MBEDTLS_INSTALL_DIR)/lib/libmbedtls.a
+    CFLAGS = -Wall -Wextra -Os -fPIC -ffunction-sections -fdata-sections -flto
     CFLAGS += -I$(MBEDTLS_INSTALL_DIR)/include
     CURL_CONFIG := --host $(ANDROID_ARCH)-linux-$(ANDROID_ABI_SUFFIX) --with-mbedtls=$(CURDIR)/$(MBEDTLS_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(MBEDTLS_INSTALL_DIR)/lib" LIBS="-lmbedtls -lmbedx509 -lmbedcrypto" AR=$(TOOLCHAIN)/bin/llvm-ar AS=$(TOOLCHAIN)/bin/llvm-as CC=$(CC) CXX=$(CXX) LD=$(TOOLCHAIN)/bin/ld RANLIB=$(TOOLCHAIN)/bin/llvm-ranlib STRIP=$(TOOLCHAIN)/bin/llvm-strip
     CURL_SSL_LIBS := -L$(MBEDTLS_INSTALL_DIR)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 
-    LDFLAGS := -shared -static-libstdc++ -llog -Wl,-z,max-page-size=16384
+    LDFLAGS := -shared -static-libstdc++ -llog -Wl,-z,max-page-size=16384 -Wl,--gc-sections -flto
+    STRIP_CMD = $(TOOLCHAIN)/bin/llvm-strip --strip-unneeded $(TARGET)
     TEST_LDFLAGS := -ldl -llog -lm
 
 else ifeq ($(PLATFORM),ios)
@@ -140,6 +146,7 @@ else ifeq ($(PLATFORM),ios)
     CXX := $(shell xcrun --sdk iphoneos -f clang++)
     CFLAGS += -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0 -framework Security
+    STRIP_CMD = strip -x -S $(TARGET)
     CURL_CONFIG := --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch arm64 -isysroot $$(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=14.0"
     CURL_SSL_LIBS := -framework CoreFoundation
 
@@ -151,6 +158,7 @@ else ifeq ($(PLATFORM),ios-sim)
     CXX := $(shell xcrun --sdk iphonesimulator -f clang++)
     CFLAGS += -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 -framework Security
+    STRIP_CMD = strip -x -S $(TARGET)
     CURL_CONFIG := --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch x86_64 -arch arm64 -isysroot $$(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=14.0"
     CURL_SSL_LIBS := -framework CoreFoundation
 endif
@@ -337,6 +345,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) | $(DIST_DIR)
 	@echo "Linking $(TARGET)..."
 	@$(LINKER) $(C_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) $(LDFLAGS) -o $(TARGET)
+	$(STRIP_CMD)
 	@echo "Build complete: $(TARGET)"
 
 .PHONY: test
@@ -407,7 +416,13 @@ $(BUILD_DIR)/e2e: $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAM
 		-o $@
 
 VECTOR_PLATFORM ?= $(PLATFORM)
+VECTOR_ARCH := $(ARCH)
 VECTOR_LIB := $(BUILD_DIR)/vector.$(EXT)
+
+# Map arch names to match sqlite-vector release naming
+ifeq ($(ARCH),aarch64)
+    VECTOR_ARCH := arm64
+endif
 
 # Detect musl libc (Alpine Linux)
 ifeq ($(PLATFORM),linux)
@@ -416,11 +431,15 @@ ifeq ($(PLATFORM),linux)
     endif
 endif
 
+# Use GitHub token if available (avoids API rate limits on CI)
+GITHUB_AUTH := $(if $(GITHUB_TOKEN),-H "Authorization: token $(GITHUB_TOKEN)",)
+
 $(VECTOR_LIB): | $(BUILD_DIR)
-	@echo "Downloading sqlite-vector for $(VECTOR_PLATFORM)-$(ARCH)..."
-	@VECTOR_TAG=$$(curl -sL https://api.github.com/repos/sqliteai/sqlite-vector/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*: *"\(.*\)".*/\1/') && \
+	@echo "Downloading sqlite-vector for $(VECTOR_PLATFORM)-$(VECTOR_ARCH)..."
+	@VECTOR_TAG=$$(curl -sL $(GITHUB_AUTH) https://api.github.com/repos/sqliteai/sqlite-vector/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*: *"\(.*\)".*/\1/') && \
+		echo "Downloading version $${VECTOR_TAG}..." && \
 		curl -sL -o $(BUILD_DIR)/vector.tar.gz \
-			"https://github.com/sqliteai/sqlite-vector/releases/download/$${VECTOR_TAG}/vector-$(VECTOR_PLATFORM)-$(ARCH)-$${VECTOR_TAG}.tar.gz" && \
+			"https://github.com/sqliteai/sqlite-vector/releases/download/$${VECTOR_TAG}/vector-$(VECTOR_PLATFORM)-$(VECTOR_ARCH)-$${VECTOR_TAG}.tar.gz" && \
 		tar -xzf $(BUILD_DIR)/vector.tar.gz -C $(BUILD_DIR) && \
 		rm -f $(BUILD_DIR)/vector.tar.gz
 	@test -f $(VECTOR_LIB) || (echo "Error: $(VECTOR_LIB) not found after download" && exit 1)

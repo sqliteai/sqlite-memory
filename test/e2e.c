@@ -11,16 +11,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <math.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include "sqlite-memory.h"
 
 #ifdef _WIN32
 #include <direct.h>
+#include <io.h>
 #define MKDIR(path) _mkdir(path)
 #define RMDIR(path) _rmdir(path)
 #else
+#include <sys/stat.h>
+#include <unistd.h>
 #define MKDIR(path) mkdir(path, 0755)
 #define RMDIR(path) rmdir(path)
 #endif

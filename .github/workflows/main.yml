@@ -17,6 +17,7 @@ jobs:
     container: ${{ matrix.container && matrix.container || '' }}
     env:
       APIKEY: ${{ secrets.APIKEY }}
+      GITHUB_TOKEN: ${{ github.token }}
     name: ${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }} build${{ matrix.skip_test != true && ( matrix.name != 'android' || matrix.arch == 'x86_64' ) && ' + test' || ''}}
     timeout-minutes: 60
     strategy:
@@ -368,6 +369,12 @@ jobs:
           make build/e2e ${{ matrix.make }} SQLITE_AMALGAM=${SQLITE_DIR}/sqlite3.c
           echo "::endgroup::"
 
+          if [ "${{ matrix.variant }}" != "local" ]; then
+            echo "::group::download sqlite-vector for android e2e"
+            make build/vector.so ${{ matrix.make }}
+            echo "::endgroup::"
+          fi
+
       - name: android test sqlite-memory
         if: matrix.name == 'android' && matrix.arch == 'x86_64'
         uses: reactivecircus/android-emulator-runner@v2.34.0
@@ -388,14 +395,12 @@ jobs:
             echo "Testing extension loading..."
             adb shell "sqlite3 :memory: '.load /data/local/tmp/memory.so' 'SELECT memory_version();'"
             echo "Extension loading test passed!"
-            if [ "${{ matrix.variant }}" != "local" ]; then
-              adb push ${{ github.workspace }}/build/e2e /data/local/tmp/
-              adb push ${{ github.workspace }}/build/vector.so /data/local/tmp/
-              adb shell "chmod +x /data/local/tmp/e2e"
-              echo "Running e2e tests..."
-              adb shell "APIKEY=$APIKEY VECTOR_LIB=/data/local/tmp/vector /data/local/tmp/e2e"
-              echo "E2E tests passed!"
-            fi
+            [ "${{ matrix.variant }}" = "local" ] || adb push ${{ github.workspace }}/build/e2e /data/local/tmp/
+            [ "${{ matrix.variant }}" = "local" ] || adb push ${{ github.workspace }}/build/vector.so /data/local/tmp/
+            [ "${{ matrix.variant }}" = "local" ] || adb shell "chmod +x /data/local/tmp/e2e"
+            [ "${{ matrix.variant }}" = "local" ] || echo "Running e2e tests..."
+            [ "${{ matrix.variant }}" = "local" ] || adb shell "APIKEY=$APIKEY VECTOR_LIB=/data/local/tmp/vector /data/local/tmp/e2e"
+            [ "${{ matrix.variant }}" = "local" ] || echo "E2E tests passed!"
 
       - name: unix test sqlite-memory
         if: matrix.skip_test != true && matrix.os != 'windows-2022' && matrix.name != 'android'
