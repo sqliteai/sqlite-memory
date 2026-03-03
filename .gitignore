@@ -8,6 +8,12 @@ dist/
 # llama.cpp build
 modules/llama.cpp/build/
 
+# curl build artifacts (curl/include/ headers remain tracked)
+curl/src/
+curl/*/
+!curl/include/
+mbedtls/
+
 # Test artifacts
 test/unittest
 test/unittest.dSYM/

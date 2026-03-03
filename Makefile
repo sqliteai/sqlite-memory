@@ -6,6 +6,8 @@ OMIT_LOCAL_ENGINE  ?= 0
 OMIT_REMOTE_ENGINE ?= 0
 OMIT_IO            ?= 0
 LLAMA ?=
+CURL_VERSION   ?= 8.12.1
+MBEDTLS_VERSION ?= 3.6.5
 
 PLATFORM ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 ARCH     ?= $(shell uname -m)
@@ -26,6 +28,11 @@ DIST_DIR    := dist
 LLAMA_DIR   := modules/llama.cpp
 LLAMA_BUILD := $(LLAMA_DIR)/build
 TEST_DIR    := test
+CURL_DIR    := curl
+CURL_SRC    := $(CURL_DIR)/src/curl-$(CURL_VERSION)
+CURL_ZIP    := $(CURL_DIR)/src/curl-$(CURL_VERSION).zip
+CURL_LIB    := $(CURL_DIR)/$(PLATFORM)/libcurl.a
+MBEDTLS_DIR := mbedtls
 
 VERSION := $(shell grep 'SQLITE_DBMEMORY_VERSION' $(SRC_DIR)/sqlite-memory.h | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
@@ -55,15 +62,20 @@ ifeq ($(PLATFORM),macos)
     INCLUDES += -I/opt/homebrew/include -I/usr/local/include
     TEST_LDFLAGS := -L/opt/homebrew/lib -L/usr/local/lib -lsqlite3
 
+    CURL_SSL_LIBS := -framework CoreFoundation
+
     ifeq ($(ARCH),x86_64)
         CFLAGS += -arch x86_64
         LDFLAGS += -arch x86_64
+        CURL_CONFIG := --with-secure-transport CFLAGS="-arch x86_64"
     else ifeq ($(ARCH),arm64)
         CFLAGS += -arch arm64
         LDFLAGS += -arch arm64
+        CURL_CONFIG := --with-secure-transport CFLAGS="-arch arm64"
     else
         CFLAGS += -arch arm64 -arch x86_64
         LDFLAGS += -arch arm64 -arch x86_64
+        CURL_CONFIG := --with-secure-transport CFLAGS="-arch x86_64 -arch arm64"
     endif
 
 else ifeq ($(PLATFORM),linux)
@@ -72,6 +84,8 @@ else ifeq ($(PLATFORM),linux)
     CXX := g++
     LDFLAGS := -shared -lpthread -lm -ldl
     TEST_LDFLAGS := -lsqlite3 -lpthread -lm -ldl
+    CURL_CONFIG := --with-openssl
+    CURL_SSL_LIBS := -lssl -lcrypto
 
 else ifeq ($(PLATFORM),windows)
     EXT := dll
@@ -80,6 +94,8 @@ else ifeq ($(PLATFORM),windows)
     LDFLAGS := -shared -static-libgcc -lbcrypt
     OUTPUT_NAME := memory
     TEST_LDFLAGS := -lsqlite3 -lbcrypt
+    CURL_CONFIG := --with-schannel CFLAGS="-DCURL_STATICLIB"
+    CURL_SSL_LIBS := -lcrypt32 -lsecur32 -lws2_32
 
 else ifeq ($(PLATFORM),android)
     EXT := so
@@ -91,17 +107,27 @@ else ifeq ($(PLATFORM),android)
     TOOLCHAIN := $(ANDROID_NDK)/toolchains/llvm/prebuilt/$(NDK_HOST)
 
     ANDROID_ARCH := $(ARCH)
+    ANDROID_ABI_SUFFIX := android26
     ifeq ($(ARCH),arm64-v8a)
         ANDROID_ARCH := aarch64
         CC := $(TOOLCHAIN)/bin/aarch64-linux-android26-clang
         CXX := $(TOOLCHAIN)/bin/aarch64-linux-android26-clang++
     else ifeq ($(ARCH),armeabi-v7a)
+        ANDROID_ARCH := armv7a
+        ANDROID_ABI_SUFFIX := androideabi26
         CC := $(TOOLCHAIN)/bin/armv7a-linux-androideabi26-clang
         CXX := $(TOOLCHAIN)/bin/armv7a-linux-androideabi26-clang++
     else ifeq ($(ARCH),x86_64)
         CC := $(TOOLCHAIN)/bin/x86_64-linux-android26-clang
         CXX := $(TOOLCHAIN)/bin/x86_64-linux-android26-clang++
     endif
+
+    CURL_LIB := $(CURL_DIR)/$(PLATFORM)/$(ANDROID_ARCH)/libcurl.a
+    MBEDTLS_INSTALL_DIR := $(MBEDTLS_DIR)/$(PLATFORM)/$(ANDROID_ARCH)
+    MBEDTLS := $(MBEDTLS_INSTALL_DIR)/lib/libmbedtls.a
+    CFLAGS += -I$(MBEDTLS_INSTALL_DIR)/include
+    CURL_CONFIG := --host $(ANDROID_ARCH)-linux-$(ANDROID_ABI_SUFFIX) --with-mbedtls=$(CURDIR)/$(MBEDTLS_INSTALL_DIR) LDFLAGS="-L$(CURDIR)/$(MBEDTLS_INSTALL_DIR)/lib" LIBS="-lmbedtls -lmbedx509 -lmbedcrypto" AR=$(TOOLCHAIN)/bin/llvm-ar AS=$(TOOLCHAIN)/bin/llvm-as CC=$(CC) CXX=$(CXX) LD=$(TOOLCHAIN)/bin/ld RANLIB=$(TOOLCHAIN)/bin/llvm-ranlib STRIP=$(TOOLCHAIN)/bin/llvm-strip
+    CURL_SSL_LIBS := -L$(MBEDTLS_INSTALL_DIR)/lib -lmbedtls -lmbedx509 -lmbedcrypto
 
     LDFLAGS := -shared -static-libstdc++ -llog -Wl,-z,max-page-size=16384
     TEST_LDFLAGS := -ldl -llog -lm
@@ -114,6 +140,8 @@ else ifeq ($(PLATFORM),ios)
     CXX := $(shell xcrun --sdk iphoneos -f clang++)
     CFLAGS += -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -miphoneos-version-min=14.0 -framework Security
+    CURL_CONFIG := --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch arm64 -isysroot $$(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=14.0"
+    CURL_SSL_LIBS := -framework CoreFoundation
 
 else ifeq ($(PLATFORM),ios-sim)
     EXT := dylib
@@ -123,6 +151,8 @@ else ifeq ($(PLATFORM),ios-sim)
     CXX := $(shell xcrun --sdk iphonesimulator -f clang++)
     CFLAGS += -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0
     LDFLAGS := -dynamiclib -isysroot $(SDK) -arch arm64 -arch x86_64 -miphonesimulator-version-min=14.0 -framework Security
+    CURL_CONFIG := --host=arm64-apple-darwin --with-secure-transport CFLAGS="-arch x86_64 -arch arm64 -isysroot $$(xcrun --sdk iphonesimulator --show-sdk-path) -miphonesimulator-version-min=14.0"
+    CURL_SSL_LIBS := -framework CoreFoundation
 endif
 
 LLAMA_OPTIONS := $(LLAMA) \
@@ -238,8 +268,15 @@ endif
 
 ifeq ($(OMIT_REMOTE_ENGINE),0)
     C_SOURCES += $(SRC_DIR)/dbmem-rembed.c
+    INCLUDES += -I$(CURL_DIR)/include
+    CURL_DEPS := $(CURL_LIB)
+    LDFLAGS += $(CURL_SSL_LIBS)
+    ifeq ($(PLATFORM),windows)
+        CFLAGS += -DCURL_STATICLIB
+    endif
 else
     DEFINES += -DDBMEM_OMIT_REMOTE_ENGINE
+    CURL_DEPS :=
 endif
 
 ifeq ($(OMIT_IO),1)
@@ -297,9 +334,9 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) -c $< -o $@
 
-$(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) | $(DIST_DIR)
+$(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) | $(DIST_DIR)
 	@echo "Linking $(TARGET)..."
-	@$(LINKER) $(C_OBJECTS) $(LLAMA_LIBS) $(LDFLAGS) -o $(TARGET)
+	@$(LINKER) $(C_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) $(LDFLAGS) -o $(TARGET)
 	@echo "Build complete: $(TARGET)"
 
 .PHONY: test
@@ -328,6 +365,9 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         TEST_LINK_EXTRAS := -static-libstdc++
     endif
 endif
+ifeq ($(OMIT_REMOTE_ENGINE),0)
+    TEST_LINK_EXTRAS += $(CURL_LIB) $(CURL_SSL_LIBS)
+endif
 
 # Android: compile SQLite amalgamation into unittest (set SQLITE_AMALGAM=path/to/sqlite3.c)
 SQLITE_AMALGAM ?=
@@ -350,7 +390,7 @@ $(BUILD_DIR)/test-sqlite3.o: $(SQLITE_AMALGAM) | $(BUILD_DIR)
 
 TEST_C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/test-%.o,$(C_SOURCES))
 
-$(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) | $(BUILD_DIR)
+$(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
 	@echo "Linking unittest..."
 	@$(LINKER) $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
 		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
@@ -382,6 +422,109 @@ clean:
 distclean: clean
 	@echo "Cleaning llama.cpp build..."
 	@rm -rf $(LLAMA_BUILD)
+
+# mbedTLS for Android - minimal TLS library
+MBEDTLS_TARBALL := $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION).tar.bz2
+
+$(MBEDTLS_TARBALL):
+	@mkdir -p $(MBEDTLS_DIR)
+	curl -L -o $(MBEDTLS_TARBALL) https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VERSION)/mbedtls-$(MBEDTLS_VERSION).tar.bz2
+
+$(MBEDTLS): $(MBEDTLS_TARBALL)
+	@mkdir -p $(MBEDTLS_DIR)
+	tar -xjf $(MBEDTLS_TARBALL) -C $(MBEDTLS_DIR)
+	mkdir -p $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION)/build
+	cd $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION)/build && \
+	cmake .. \
+		-DCMAKE_TOOLCHAIN_FILE=$(ANDROID_NDK)/build/cmake/android.toolchain.cmake \
+		-DANDROID_ABI=$(if $(filter aarch64,$(ANDROID_ARCH)),arm64-v8a,$(if $(filter armv7a,$(ANDROID_ARCH)),armeabi-v7a,x86_64)) \
+		-DANDROID_PLATFORM=android-26 \
+		-DCMAKE_BUILD_TYPE=MinSizeRel \
+		-DCMAKE_INSTALL_PREFIX=$(CURDIR)/$(MBEDTLS_INSTALL_DIR) \
+		-DENABLE_PROGRAMS=OFF \
+		-DENABLE_TESTING=OFF \
+		-DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+		-DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+		-DCMAKE_C_FLAGS="-Os -ffunction-sections -fdata-sections" && \
+	$(MAKE) && $(MAKE) install
+	rm -rf $(MBEDTLS_DIR)/mbedtls-$(MBEDTLS_VERSION)
+
+# Download and build libcurl
+$(CURL_ZIP):
+	@mkdir -p $(CURL_DIR)/src
+	curl -L -o $(CURL_ZIP) "https://github.com/curl/curl/releases/download/curl-$(subst .,_,$(CURL_VERSION))/curl-$(CURL_VERSION).zip"
+
+ifeq ($(PLATFORM),android)
+$(CURL_LIB): $(MBEDTLS) $(CURL_ZIP)
+else
+$(CURL_LIB): $(CURL_ZIP)
+endif
+ifeq ($(PLATFORM),windows)
+	powershell -Command "Expand-Archive -Path '$(CURL_ZIP)' -DestinationPath '$(CURL_DIR)\src\'"
+else
+	unzip -o $(CURL_ZIP) -d $(CURL_DIR)/src/.
+endif
+	cd $(CURL_SRC) && ./configure \
+	--without-libpsl \
+	--disable-alt-svc \
+	--disable-ares \
+	--disable-cookies \
+	--disable-basic-auth \
+	--disable-digest-auth \
+	--disable-kerberos-auth \
+	--disable-negotiate-auth \
+	--disable-aws \
+	--disable-dateparse \
+	--disable-dnsshuffle \
+	--disable-doh \
+	--disable-form-api \
+	--disable-hsts \
+	--disable-ipv6 \
+	--disable-libcurl-option \
+	--disable-manual \
+	--disable-mime \
+	--disable-netrc \
+	--disable-ntlm \
+	--disable-ntlm-wb \
+	--disable-progress-meter \
+	--disable-proxy \
+	--disable-pthreads \
+	--disable-socketpair \
+	--disable-threaded-resolver \
+	--disable-tls-srp \
+	--disable-verbose \
+	--disable-versioned-symbols \
+	--enable-symbol-hiding \
+	--without-brotli \
+	--without-zstd \
+	--without-libidn2 \
+	--without-librtmp \
+	--without-zlib \
+	--without-nghttp2 \
+	--without-ngtcp2 \
+	--disable-shared \
+	--disable-ftp \
+	--disable-file \
+	--disable-ipfs \
+	--disable-ldap \
+	--disable-ldaps \
+	--disable-rtsp \
+	--disable-dict \
+	--disable-telnet \
+	--disable-tftp \
+	--disable-pop3 \
+	--disable-imap \
+	--disable-smb \
+	--disable-smtp \
+	--disable-gopher \
+	--disable-mqtt \
+	--disable-docs \
+	--enable-static \
+	$(CURL_CONFIG)
+	cd $(CURL_SRC) && $(MAKE)
+	@mkdir -p $(dir $(CURL_LIB))
+	mv $(CURL_SRC)/lib/.libs/libcurl.a $(CURL_LIB)
+	rm -rf $(CURL_DIR)/src/curl-$(CURL_VERSION)
 
 define PLIST
 <?xml version=\"1.0\" encoding=\"UTF-8\"?>\

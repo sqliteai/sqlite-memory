@@ -242,7 +242,7 @@ jobs:
 
       - name: linux-musl x86_64 install dependencies
         if: matrix.name == 'linux-musl' && matrix.arch == 'x86_64' && matrix.container
-        run: apk update && apk add --no-cache gcc g++ make cmake sqlite sqlite-dev musl-dev linux-headers git
+        run: apk update && apk add --no-cache gcc g++ make cmake sqlite sqlite-dev musl-dev linux-headers git curl openssl-dev
 
       - uses: actions/checkout@v4.2.2
         with:
@@ -259,6 +259,10 @@ jobs:
             mingw-w64-x86_64-cc
             mingw-w64-x86_64-cmake
 
+      - name: linux install dependencies
+        if: matrix.name == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
       - name: macos install dependencies
         if: matrix.name == 'macos'
         run: brew link sqlite --force
@@ -272,7 +276,7 @@ jobs:
             -w /workspace \
             alpine:latest \
             tail -f /dev/null
-          docker exec alpine sh -c "apk update && apk add --no-cache gcc g++ make cmake sqlite sqlite-dev musl-dev linux-headers git"
+          docker exec alpine sh -c "apk update && apk add --no-cache gcc g++ make cmake sqlite sqlite-dev musl-dev linux-headers git curl openssl-dev"
 
       - name: android-aar setup java
         if: matrix.name == 'android-aar'
