@@ -14,10 +14,16 @@
 #include <direct.h>
 #define mkdir_p(path) _mkdir(path)
 #define rmdir_p(path) _rmdir(path)
+#ifndef TEST_TMP_DIR
+#define TEST_TMP_DIR "build/test_tmp"  // Windows: native APIs don't understand /tmp
+#endif
 #else
 #include <unistd.h>
 #define mkdir_p(path) mkdir(path, 0755)
 #define rmdir_p(path) rmdir(path)
+#ifndef TEST_TMP_DIR
+#define TEST_TMP_DIR "/tmp"
+#endif
 #endif
 
 #include "dbmem-utils.h"
@@ -1041,7 +1047,7 @@ static int path_contains(scan_ctx_t *ctx, const char *substring) {
 
 TEST(dbmem_dir_scan_empty_dir) {
     // Create empty test directory
-    const char *test_dir = "/tmp/dbmem_test_empty";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_empty";
     rmdir_p(test_dir);  // Remove if exists
     mkdir_p(test_dir);
 
@@ -1057,8 +1063,8 @@ TEST(dbmem_dir_scan_empty_dir) {
 
 TEST(dbmem_dir_scan_single_file) {
     // Create test directory with one file
-    const char *test_dir = "/tmp/dbmem_test_single";
-    const char *test_file = "/tmp/dbmem_test_single/file.txt";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_single";
+    const char *test_file = TEST_TMP_DIR "/dbmem_test_single/file.txt";
 
     rmdir_p(test_dir);
     remove_test_file(test_file);
@@ -1079,18 +1085,18 @@ TEST(dbmem_dir_scan_single_file) {
 
 TEST(dbmem_dir_scan_multiple_files) {
     // Create test directory with multiple files
-    const char *test_dir = "/tmp/dbmem_test_multi";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_multi";
 
     // Clean up first
-    remove("/tmp/dbmem_test_multi/a.txt");
-    remove("/tmp/dbmem_test_multi/b.txt");
-    remove("/tmp/dbmem_test_multi/c.md");
+    remove(TEST_TMP_DIR "/dbmem_test_multi/a.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_multi/b.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_multi/c.md");
     rmdir_p(test_dir);
 
     mkdir_p(test_dir);
-    create_test_file("/tmp/dbmem_test_multi/a.txt", "a");
-    create_test_file("/tmp/dbmem_test_multi/b.txt", "b");
-    create_test_file("/tmp/dbmem_test_multi/c.md", "c");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_multi/a.txt", "a");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_multi/b.txt", "b");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_multi/c.md", "c");
 
     scan_ctx_t ctx = {0};
     int rc = dbmem_dir_scan(test_dir, scan_callback, &ctx);
@@ -1102,24 +1108,24 @@ TEST(dbmem_dir_scan_multiple_files) {
     ASSERT(path_contains(&ctx, "c.md"));
 
     free_scan_ctx(&ctx);
-    remove("/tmp/dbmem_test_multi/a.txt");
-    remove("/tmp/dbmem_test_multi/b.txt");
-    remove("/tmp/dbmem_test_multi/c.md");
+    remove(TEST_TMP_DIR "/dbmem_test_multi/a.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_multi/b.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_multi/c.md");
     rmdir_p(test_dir);
 }
 
 TEST(dbmem_dir_scan_recursive) {
     // Create nested directory structure
-    const char *base = "/tmp/dbmem_test_recursive";
-    const char *sub1 = "/tmp/dbmem_test_recursive/sub1";
-    const char *sub2 = "/tmp/dbmem_test_recursive/sub2";
-    const char *subsub = "/tmp/dbmem_test_recursive/sub1/subsub";
+    const char *base = TEST_TMP_DIR "/dbmem_test_recursive";
+    const char *sub1 = TEST_TMP_DIR "/dbmem_test_recursive/sub1";
+    const char *sub2 = TEST_TMP_DIR "/dbmem_test_recursive/sub2";
+    const char *subsub = TEST_TMP_DIR "/dbmem_test_recursive/sub1/subsub";
 
     // Clean up first
-    remove("/tmp/dbmem_test_recursive/root.txt");
-    remove("/tmp/dbmem_test_recursive/sub1/file1.txt");
-    remove("/tmp/dbmem_test_recursive/sub1/subsub/deep.txt");
-    remove("/tmp/dbmem_test_recursive/sub2/file2.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/root.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/sub1/file1.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/sub1/subsub/deep.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/sub2/file2.txt");
     rmdir_p(subsub);
     rmdir_p(sub1);
     rmdir_p(sub2);
@@ -1131,10 +1137,10 @@ TEST(dbmem_dir_scan_recursive) {
     mkdir_p(sub2);
     mkdir_p(subsub);
 
-    create_test_file("/tmp/dbmem_test_recursive/root.txt", "root");
-    create_test_file("/tmp/dbmem_test_recursive/sub1/file1.txt", "file1");
-    create_test_file("/tmp/dbmem_test_recursive/sub2/file2.txt", "file2");
-    create_test_file("/tmp/dbmem_test_recursive/sub1/subsub/deep.txt", "deep");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_recursive/root.txt", "root");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_recursive/sub1/file1.txt", "file1");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_recursive/sub2/file2.txt", "file2");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_recursive/sub1/subsub/deep.txt", "deep");
 
     scan_ctx_t ctx = {0};
     int rc = dbmem_dir_scan(base, scan_callback, &ctx);
@@ -1153,10 +1159,10 @@ TEST(dbmem_dir_scan_recursive) {
     free_scan_ctx(&ctx);
 
     // Cleanup
-    remove("/tmp/dbmem_test_recursive/root.txt");
-    remove("/tmp/dbmem_test_recursive/sub1/file1.txt");
-    remove("/tmp/dbmem_test_recursive/sub1/subsub/deep.txt");
-    remove("/tmp/dbmem_test_recursive/sub2/file2.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/root.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/sub1/file1.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/sub1/subsub/deep.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_recursive/sub2/file2.txt");
     rmdir_p(subsub);
     rmdir_p(sub1);
     rmdir_p(sub2);
@@ -1165,15 +1171,15 @@ TEST(dbmem_dir_scan_recursive) {
 
 TEST(dbmem_dir_scan_skips_hidden) {
     // Create directory with hidden files (dot files)
-    const char *test_dir = "/tmp/dbmem_test_hidden";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_hidden";
 
-    remove("/tmp/dbmem_test_hidden/visible.txt");
-    remove("/tmp/dbmem_test_hidden/.hidden");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden/visible.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden/.hidden");
     rmdir_p(test_dir);
 
     mkdir_p(test_dir);
-    create_test_file("/tmp/dbmem_test_hidden/visible.txt", "visible");
-    create_test_file("/tmp/dbmem_test_hidden/.hidden", "hidden");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_hidden/visible.txt", "visible");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_hidden/.hidden", "hidden");
 
     scan_ctx_t ctx = {0};
     int rc = dbmem_dir_scan(test_dir, scan_callback, &ctx);
@@ -1184,25 +1190,25 @@ TEST(dbmem_dir_scan_skips_hidden) {
     ASSERT(!path_contains(&ctx, ".hidden"));
 
     free_scan_ctx(&ctx);
-    remove("/tmp/dbmem_test_hidden/visible.txt");
-    remove("/tmp/dbmem_test_hidden/.hidden");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden/visible.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden/.hidden");
     rmdir_p(test_dir);
 }
 
 TEST(dbmem_dir_scan_skips_hidden_dirs) {
     // Create directory with hidden subdirectory
-    const char *test_dir = "/tmp/dbmem_test_hidden_dir";
-    const char *hidden_dir = "/tmp/dbmem_test_hidden_dir/.hidden_dir";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_hidden_dir";
+    const char *hidden_dir = TEST_TMP_DIR "/dbmem_test_hidden_dir/.hidden_dir";
 
-    remove("/tmp/dbmem_test_hidden_dir/visible.txt");
-    remove("/tmp/dbmem_test_hidden_dir/.hidden_dir/secret.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden_dir/visible.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden_dir/.hidden_dir/secret.txt");
     rmdir_p(hidden_dir);
     rmdir_p(test_dir);
 
     mkdir_p(test_dir);
     mkdir_p(hidden_dir);
-    create_test_file("/tmp/dbmem_test_hidden_dir/visible.txt", "visible");
-    create_test_file("/tmp/dbmem_test_hidden_dir/.hidden_dir/secret.txt", "secret");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_hidden_dir/visible.txt", "visible");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_hidden_dir/.hidden_dir/secret.txt", "secret");
 
     scan_ctx_t ctx = {0};
     int rc = dbmem_dir_scan(test_dir, scan_callback, &ctx);
@@ -1213,8 +1219,8 @@ TEST(dbmem_dir_scan_skips_hidden_dirs) {
     ASSERT(!path_contains(&ctx, "secret.txt"));
 
     free_scan_ctx(&ctx);
-    remove("/tmp/dbmem_test_hidden_dir/visible.txt");
-    remove("/tmp/dbmem_test_hidden_dir/.hidden_dir/secret.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden_dir/visible.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_hidden_dir/.hidden_dir/secret.txt");
     rmdir_p(hidden_dir);
     rmdir_p(test_dir);
 }
@@ -1227,13 +1233,13 @@ TEST(dbmem_dir_scan_null_path) {
 }
 
 TEST(dbmem_dir_scan_null_callback) {
-    int rc = dbmem_dir_scan("/tmp", NULL, NULL);
+    int rc = dbmem_dir_scan(".", NULL, NULL);  // Use current dir (exists on all platforms)
     ASSERT_EQ(rc, -1);
 }
 
 TEST(dbmem_dir_scan_nonexistent) {
     scan_ctx_t ctx = {0};
-    int rc = dbmem_dir_scan("/tmp/nonexistent_dir_12345", scan_callback, &ctx);
+    int rc = dbmem_dir_scan(TEST_TMP_DIR "/nonexistent_dir_12345", scan_callback, &ctx);
     ASSERT_EQ(rc, -1);
     free_scan_ctx(&ctx);
 }
@@ -1248,17 +1254,17 @@ static int abort_scan_callback(const char *path, void *data) {
 
 TEST(dbmem_dir_scan_callback_abort) {
     // Create directory with multiple files
-    const char *test_dir = "/tmp/dbmem_test_abort";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_abort";
 
-    remove("/tmp/dbmem_test_abort/a.txt");
-    remove("/tmp/dbmem_test_abort/b.txt");
-    remove("/tmp/dbmem_test_abort/c.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_abort/a.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_abort/b.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_abort/c.txt");
     rmdir_p(test_dir);
 
     mkdir_p(test_dir);
-    create_test_file("/tmp/dbmem_test_abort/a.txt", "a");
-    create_test_file("/tmp/dbmem_test_abort/b.txt", "b");
-    create_test_file("/tmp/dbmem_test_abort/c.txt", "c");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_abort/a.txt", "a");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_abort/b.txt", "b");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_abort/c.txt", "c");
 
     int count = 0;
     int rc = dbmem_dir_scan(test_dir, abort_scan_callback, &count);
@@ -1266,31 +1272,31 @@ TEST(dbmem_dir_scan_callback_abort) {
     ASSERT_EQ(rc, -1);  // Should return error when callback aborts
     ASSERT_EQ(count, 2);  // Should have stopped after 2 files
 
-    remove("/tmp/dbmem_test_abort/a.txt");
-    remove("/tmp/dbmem_test_abort/b.txt");
-    remove("/tmp/dbmem_test_abort/c.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_abort/a.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_abort/b.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_abort/c.txt");
     rmdir_p(test_dir);
 }
 
 TEST(dbmem_dir_scan_trailing_slash) {
     // Test with trailing slash in path
-    const char *test_dir = "/tmp/dbmem_test_slash";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_slash";
 
-    remove("/tmp/dbmem_test_slash/file.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_slash/file.txt");
     rmdir_p(test_dir);
 
     mkdir_p(test_dir);
-    create_test_file("/tmp/dbmem_test_slash/file.txt", "test");
+    create_test_file(TEST_TMP_DIR "/dbmem_test_slash/file.txt", "test");
 
     scan_ctx_t ctx = {0};
-    int rc = dbmem_dir_scan("/tmp/dbmem_test_slash/", scan_callback, &ctx);
+    int rc = dbmem_dir_scan(TEST_TMP_DIR "/dbmem_test_slash/", scan_callback, &ctx);
 
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(ctx.count, 1);
     ASSERT(path_contains(&ctx, "file.txt"));
 
     free_scan_ctx(&ctx);
-    remove("/tmp/dbmem_test_slash/file.txt");
+    remove(TEST_TMP_DIR "/dbmem_test_slash/file.txt");
     rmdir_p(test_dir);
 }
 

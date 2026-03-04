@@ -1,0 +1,121 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+    }
+}
+
+plugins {
+    id 'com.gradleup.nmcp.aggregation' version '1.2.0'
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'maven-publish'
+apply plugin: 'signing'
+
+android {
+    namespace 'ai.sqlite.memory'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                groupId = 'ai.sqlite'
+                artifactId = 'memory'
+                version = project.hasProperty('VERSION') ? project.VERSION : ['make', 'version'].execute(null, file('../..')).text.trim()
+
+                artifact(project.hasProperty('AAR_PATH') ? project.AAR_PATH : "$buildDir/outputs/aar/android-release.aar")
+
+                // Maven Central metadata
+                pom {
+                    name = 'sqlite-memory'
+                    description = 'A SQLite extension that gives AI agents persistent, searchable memory. Features hybrid semantic search (vector similarity + FTS5), markdown-aware chunking, and local embedding via llama.cpp. Memory databases can be synced between agents using offline first technology each agent works independently and syncs when connected, making it ideal for distributed AI systems, edge deployments, and collaborative agent architectures.'
+                    url = 'https://github.com/sqliteai/sqlite-memory'
+
+                    licenses {
+                        license {
+                            name = 'Elastic License 2.0'
+                            url = 'https://www.elastic.co/licensing/elastic-license'
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id = 'sqliteai'
+                            name = 'SQLite Cloud, Inc.'
+                            email = 'info@sqlitecloud.io'
+                            organization = 'SQLite Cloud, Inc.'
+                            organizationUrl = 'https://sqlite.ai'
+                        }
+                    }
+
+                    scm {
+                        connection = 'scm:git:git://github.com/sqliteai/sqlite-memory.git'
+                        developerConnection = 'scm:git:ssh://github.com:sqliteai/sqlite-memory.git'
+                        url = 'https://github.com/sqliteai/sqlite-memory/tree/main'
+                    }
+                }
+            }
+        }
+    }
+
+    // Signing configuration for Maven Central
+    signing {
+        required { project.hasProperty("SIGNING_KEY") }
+        if (project.hasProperty("SIGNING_KEY")) {
+            useInMemoryPgpKeys(
+                project.property("SIGNING_KEY").toString(),
+                project.property("SIGNING_PASSWORD").toString()
+            )
+            sign publishing.publications.release
+        }
+    }
+}
+
+// Maven Central publishing via NMCP aggregation
+nmcpAggregation {
+    if (project.hasProperty("SONATYPE_USERNAME") && project.hasProperty("SONATYPE_PASSWORD")) {
+        centralPortal {
+            username = project.property("SONATYPE_USERNAME")
+            password = project.property("SONATYPE_PASSWORD")
+            publishingType = "AUTOMATIC"
+        }
+        publishAllProjectsProbablyBreakingProjectIsolation()
+    }
+}

@@ -347,9 +347,12 @@ static int dbmem_database_init (sqlite3 *db) {
         rc = SQLITE_OK;
     }
     
-    // explicitly allows extension loading (only when loaded dynamically)
+    // explicitly allows extension loading (only available when linked statically)
+    // when loaded dynamically, the calling application must enable extension loading
+    #if defined(SQLITE_CORE) && !defined(SQLITE_OMIT_LOAD_EXTENSION)
     rc = sqlite3_enable_load_extension(db, 1);
     if (rc != SQLITE_OK) return rc;
+    #endif
 
     return rc;
 }

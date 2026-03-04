@@ -20,6 +20,8 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 #define API_URL                 "https://api.vectors.space/v1/embeddings"
 #define DEFAULT_BUFFER_SIZE     (100*1024) //100KB, enough for 4096 embedding dimension without reallocation
 
+static size_t dbmem_remote_receive_data(void *contents, size_t size, size_t nmemb, void *xdata);
+
 struct dbmem_remote_engine_t {
     dbmem_context       *context;
     
