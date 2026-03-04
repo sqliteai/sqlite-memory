@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define SQLITE_DBMEMORY_VERSION "0.7.0"
+#define SQLITE_DBMEMORY_VERSION "0.7.1"
 
 // public API
 SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);

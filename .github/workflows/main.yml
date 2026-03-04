@@ -525,6 +525,31 @@ jobs:
           echo "❌ SQLITE_DBMEMORY_VERSION not found in sqlite-memory.h"
           exit 1
 
+      - uses: actions/checkout@v4.2.2
+        if: steps.tag.outputs.version != ''
+        with:
+          repository: sqliteai/sqlite-wasm
+          path: sqlite-wasm
+          submodules: recursive
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: release sqlite-wasm
+        if: steps.tag.outputs.version != ''
+        run: |
+          cd sqlite-wasm
+          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
+          git config --global user.name "$GITHUB_ACTOR"
+          cd modules/sqlite-memory
+          git checkout ${{ github.sha }}
+          cd ../..
+          git add modules/sqlite-memory
+          PKG=sqlite-wasm/package.json
+          TMP=sqlite-wasm/package.tmp.json
+          jq --arg version "$(cat modules/sqlite/VERSION)-sync.$(cd modules/sqlite-sync && make version)-vector.$(cd modules/sqlite-vector && make version)-memory.$(cd modules/sqlite-memory && make version)" '.version = $version' "$PKG" > "$TMP" && mv "$TMP" "$PKG"
+          git add "$PKG"
+          git commit -m "Bump sqlite-memory version to ${{ steps.tag.outputs.version }}"
+          git push origin main
+
       - uses: softprops/action-gh-release@v2.2.1
         if: steps.tag.outputs.version != ''
         with:
