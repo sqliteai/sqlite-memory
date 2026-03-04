@@ -133,8 +133,15 @@ TEST(memory_version) {
 }
 
 TEST(load_vector) {
+    // Strip file extension — load_extension() appends it automatically
+    char path[512];
+    snprintf(path, sizeof(path), "%s", vector_lib);
+    char *dot = strrchr(path, '.');
+    char *slash = strrchr(path, '/');
+    if (dot && (!slash || dot > slash)) *dot = '\0';
+
     char sql[512];
-    snprintf(sql, sizeof(sql), "SELECT load_extension('%s');", vector_lib);
+    snprintf(sql, sizeof(sql), "SELECT load_extension('%s');", path);
     ASSERT_SQL_OK(db, sql);
 
     result_buf[0] = '\0';
