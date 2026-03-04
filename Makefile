@@ -426,7 +426,7 @@ endif
 
 # Detect musl libc (Alpine Linux)
 ifeq ($(PLATFORM),linux)
-    ifeq ($(shell cat /etc/alpine-release 2>/dev/null && echo yes),yes)
+    ifeq ($(shell test -f /etc/alpine-release && echo yes),yes)
         VECTOR_PLATFORM := linux-musl
     endif
 endif
