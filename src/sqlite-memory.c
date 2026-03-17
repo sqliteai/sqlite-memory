@@ -571,7 +571,7 @@ static void dbmem_context_free (void *ptr) {
     if (ctx->cache_buffer) dbmem_free(ctx->cache_buffer);
 
     // custom provider
-    if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine);
+    if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine, ctx->custom_provider.xdata);
     if (ctx->custom_provider_name) dbmem_free(ctx->custom_provider_name);
 
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
@@ -608,7 +608,7 @@ bool dbmem_context_is_custom (dbmem_context *ctx) {
 
 int dbmem_context_custom_compute (dbmem_context *ctx, const char *text, int text_len, embedding_result_t *result) {
     dbmem_embedding_result_t cr = {0};
-    int rc = ctx->custom_provider.compute(ctx->custom_engine, text, text_len, &cr);
+    int rc = ctx->custom_provider.compute(ctx->custom_engine, text, text_len, ctx->custom_provider.xdata, &cr);
     if (rc != 0) return rc;
     result->n_tokens = cr.n_tokens;
     result->n_tokens_truncated = cr.n_tokens_truncated;
@@ -950,10 +950,10 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     // custom provider path
     if (is_custom_provider) {
         // free previous custom engine if any
-        if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine);
+        if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine, ctx->custom_provider.xdata);
         ctx->custom_engine = NULL;
 
-        ctx->custom_engine = ctx->custom_provider.init(model, ctx->api_key, ctx->error_msg);
+        ctx->custom_engine = ctx->custom_provider.init(model, ctx->api_key, ctx->custom_provider.xdata, ctx->error_msg);
         if (ctx->custom_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
@@ -1562,7 +1562,7 @@ SQLITE_DBMEMORY_API int sqlite3_memory_register_provider (sqlite3 *db, const cha
     if (!ctx) return SQLITE_ERROR;
 
     // free previous custom provider if any
-    if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine);
+    if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine, ctx->custom_provider.xdata);
     ctx->custom_engine = NULL;
     if (ctx->custom_provider_name) dbmem_free(ctx->custom_provider_name);
 

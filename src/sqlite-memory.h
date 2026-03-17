@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define SQLITE_DBMEMORY_VERSION "0.8.0"
+#define SQLITE_DBMEMORY_VERSION "0.8.1"
 
 // public API
 SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
@@ -47,14 +47,18 @@ typedef struct {
 typedef struct {
     // Called when memory_set_model(provider, model) matches this provider.
     // api_key is the value set via memory_set_apikey() (may be NULL).
+    // xdata is the user-supplied generic pointer from the struct.
     // Return opaque engine pointer, or NULL on error (fill err_msg).
-    void *(*init)(const char *model, const char *api_key, char err_msg[1024]);
+    void *(*init)(const char *model, const char *api_key, void *xdata, char err_msg[1024]);
 
     // Compute embedding for text. Return 0 on success, non-zero on error.
-    int   (*compute)(void *engine, const char *text, int text_len, dbmem_embedding_result_t *result);
+    int   (*compute)(void *engine, const char *text, int text_len, void *xdata, dbmem_embedding_result_t *result);
 
     // Free the engine. Called on context teardown or model change. May be NULL.
-    void  (*free)(void *engine);
+    void  (*free)(void *engine, void *xdata);
+
+    // User-supplied generic data pointer, passed to all callbacks.
+    void  *xdata;
 } dbmem_provider_t;
 
 // Register a custom embedding provider.

@@ -2231,8 +2231,9 @@ typedef struct {
     char api_key[256];
 } dummy_engine_t;
 
-static void *dummy_init(const char *model, const char *api_key, char err_msg[1024]) {
+static void *dummy_init(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
     UNUSED_PARAM(model);
+    UNUSED_PARAM(xdata);
     dummy_engine_t *e = (dummy_engine_t *)calloc(1, sizeof(dummy_engine_t));
     if (!e) { snprintf(err_msg, 1024, "alloc failed"); return NULL; }
     e->dimension = 4;
@@ -2244,9 +2245,10 @@ static void *dummy_init(const char *model, const char *api_key, char err_msg[102
     return e;
 }
 
-static int dummy_compute(void *engine, const char *text, int text_len, dbmem_embedding_result_t *result) {
+static int dummy_compute(void *engine, const char *text, int text_len, void *xdata, dbmem_embedding_result_t *result) {
     UNUSED_PARAM(text);
     UNUSED_PARAM(text_len);
+    UNUSED_PARAM(xdata);
     dummy_engine_t *e = (dummy_engine_t *)engine;
     e->compute_count++;
     result->n_tokens = text_len / 4;
@@ -2256,13 +2258,15 @@ static int dummy_compute(void *engine, const char *text, int text_len, dbmem_emb
     return 0;
 }
 
-static void dummy_free(void *engine) {
+static void dummy_free(void *engine, void *xdata) {
+    UNUSED_PARAM(xdata);
     free(engine);
 }
 
-static void *dummy_init_fail(const char *model, const char *api_key, char err_msg[1024]) {
+static void *dummy_init_fail(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
     UNUSED_PARAM(model);
     UNUSED_PARAM(api_key);
+    UNUSED_PARAM(xdata);
     snprintf(err_msg, 1024, "intentional init failure");
     return NULL;
 }
