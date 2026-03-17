@@ -5,6 +5,7 @@
 OMIT_LOCAL_ENGINE  ?= 0
 OMIT_REMOTE_ENGINE ?= 0
 OMIT_IO            ?= 0
+OMIT_CURL          ?= 0
 LLAMA ?=
 CURL_VERSION   ?= 8.12.1
 MBEDTLS_VERSION ?= 3.6.5
@@ -268,7 +269,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     LINKER := $(CXX)
     BUILD_DEPS := llama
 else
-    DEFINES += -DDBMEM_OMIT_LOCAL_ENGINE
+    override DEFINES += -DDBMEM_OMIT_LOCAL_ENGINE
     LLAMA_LIBS :=
     LINKER := $(CC)
     BUILD_DEPS :=
@@ -276,22 +277,30 @@ endif
 
 ifeq ($(OMIT_REMOTE_ENGINE),0)
     C_SOURCES += $(SRC_DIR)/dbmem-rembed.c
-    INCLUDES += -I$(CURL_DIR)/include
-    CURL_DEPS := $(CURL_LIB)
-    LDFLAGS += $(CURL_SSL_LIBS)
-    ifeq ($(PLATFORM),windows)
-        CFLAGS += -DCURL_STATICLIB
+    ifeq ($(OMIT_CURL),1)
+        override DEFINES += -DDBMEM_OMIT_CURL
+        OBJC_SOURCES := $(SRC_DIR)/dbmem-http.m
+        LDFLAGS += -framework Foundation
+        CURL_DEPS :=
+    else
+        INCLUDES += -I$(CURL_DIR)/include
+        CURL_DEPS := $(CURL_LIB)
+        LDFLAGS += $(CURL_SSL_LIBS)
+        ifeq ($(PLATFORM),windows)
+            CFLAGS += -DCURL_STATICLIB
+        endif
     endif
 else
-    DEFINES += -DDBMEM_OMIT_REMOTE_ENGINE
+    override DEFINES += -DDBMEM_OMIT_REMOTE_ENGINE
     CURL_DEPS :=
 endif
 
 ifeq ($(OMIT_IO),1)
-    DEFINES += -DDBMEM_OMIT_IO
+    override DEFINES += -DDBMEM_OMIT_IO
 endif
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
+OBJC_OBJECTS := $(patsubst $(SRC_DIR)/%.m,$(BUILD_DIR)/%.o,$(OBJC_SOURCES))
 
 TARGET := $(DIST_DIR)/$(OUTPUT_NAME).$(EXT)
 
@@ -342,9 +351,13 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $<..."
 	@$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) -c $< -o $@
 
-$(TARGET): $(C_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) | $(DIST_DIR)
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.m | $(BUILD_DIR)
+	@echo "Compiling $<..."
+	@$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) -fobjc-arc -c $< -o $@
+
+$(TARGET): $(C_OBJECTS) $(OBJC_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) | $(DIST_DIR)
 	@echo "Linking $(TARGET)..."
-	@$(LINKER) $(C_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) $(LDFLAGS) -o $(TARGET)
+	@$(LINKER) $(C_OBJECTS) $(OBJC_OBJECTS) $(LLAMA_LIBS) $(CURL_DEPS) $(LDFLAGS) -o $(TARGET)
 	$(STRIP_CMD)
 	@echo "Build complete: $(TARGET)"
 
@@ -375,7 +388,11 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
     endif
 endif
 ifeq ($(OMIT_REMOTE_ENGINE),0)
-    TEST_LINK_EXTRAS += $(CURL_LIB) $(CURL_SSL_LIBS)
+    ifneq ($(OMIT_CURL),1)
+        TEST_LINK_EXTRAS += $(CURL_LIB) $(CURL_SSL_LIBS)
+    else
+        TEST_LINK_EXTRAS += -framework Foundation
+    endif
 endif
 
 # Android: compile SQLite amalgamation into unittest (set SQLITE_AMALGAM=path/to/sqlite3.c)
@@ -393,15 +410,20 @@ $(BUILD_DIR)/test-%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "Compiling $< (for test)..."
 	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
 
+$(BUILD_DIR)/test-%.o: $(SRC_DIR)/%.m | $(BUILD_DIR)
+	@echo "Compiling $< (for test)..."
+	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -fobjc-arc -c $< -o $@
+
 $(BUILD_DIR)/test-sqlite3.o: $(SQLITE_AMALGAM) | $(BUILD_DIR)
 	@echo "Compiling sqlite3.c (amalgamation)..."
 	@$(CC) $(CFLAGS) -DSQLITE_ENABLE_FTS5 -c $< -o $@
 
 TEST_C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/test-%.o,$(C_SOURCES))
+TEST_OBJC_OBJECTS := $(patsubst $(SRC_DIR)/%.m,$(BUILD_DIR)/test-%.o,$(OBJC_SOURCES))
 
-$(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
+$(BUILD_DIR)/unittest: $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_OBJC_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
 	@echo "Linking unittest..."
-	@$(LINKER) $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
+	@$(LINKER) $(BUILD_DIR)/unittest.o $(TEST_C_OBJECTS) $(TEST_OBJC_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
 		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
 		-o $@
 
@@ -409,9 +431,9 @@ $(BUILD_DIR)/e2e.o: $(TEST_DIR)/e2e.c | $(BUILD_DIR)
 	@echo "Compiling e2e.c..."
 	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
 
-$(BUILD_DIR)/e2e: $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
+$(BUILD_DIR)/e2e: $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_OBJC_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
 	@echo "Linking e2e..."
-	@$(LINKER) $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
+	@$(LINKER) $(BUILD_DIR)/e2e.o $(TEST_C_OBJECTS) $(TEST_OBJC_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
 		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
 		-o $@
 
