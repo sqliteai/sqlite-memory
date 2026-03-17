@@ -31,4 +31,8 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
 int  dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *text, int text_len, embedding_result_t *result);
 void dbmem_remote_engine_free (dbmem_remote_engine_t *engine);
 
+// Custom provider (always available, defined in sqlite-memory.c)
+typedef struct dbmem_context dbmem_context;
+int  dbmem_context_custom_compute (dbmem_context *ctx, const char *text, int text_len, embedding_result_t *result);
+
 #endif

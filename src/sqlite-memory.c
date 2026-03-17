@@ -77,6 +77,12 @@ struct dbmem_context {
     dbmem_local_engine_t    *l_engine;          // Local embedding engine (llama.cpp based)
     dbmem_remote_engine_t   *r_engine;          // Remote embedding engine (vectors.space based)
 
+    // Custom embedding provider
+    dbmem_provider_t        custom_provider;    // User-registered callbacks
+    char                    *custom_provider_name; // Provider name for matching
+    void                    *custom_engine;     // Opaque engine from custom_provider.init
+    bool                    is_custom;          // True when custom provider is active
+
     // Provider configuration
     char        *provider;                      // Embedding provider: "local" or remote service name
     char        *model;                         // Model path (local) or model identifier (remote)
@@ -564,10 +570,14 @@ static void dbmem_context_free (void *ptr) {
     if (ctx->extensions) dbmem_free(ctx->extensions);
     if (ctx->cache_buffer) dbmem_free(ctx->cache_buffer);
 
+    // custom provider
+    if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine);
+    if (ctx->custom_provider_name) dbmem_free(ctx->custom_provider_name);
+
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
     if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
     #endif
-    
+
     #ifndef DBMEM_OMIT_REMOTE_ENGINE
     if (ctx->r_engine) dbmem_remote_engine_free(ctx->r_engine);
     #endif
@@ -584,8 +594,27 @@ static void dbmem_context_reset_temp_values (dbmem_context *ctx) {
 }
 
 void *dbmem_context_engine (dbmem_context *ctx, bool *is_local) {
+    if (ctx->is_custom) {
+        if (is_local) *is_local = false;
+        return ctx->custom_engine;
+    }
     if (is_local) *is_local = ctx->is_local;
     return (ctx->is_local) ? (void *)ctx->l_engine : (void *)ctx->r_engine;
+}
+
+bool dbmem_context_is_custom (dbmem_context *ctx) {
+    return ctx->is_custom;
+}
+
+int dbmem_context_custom_compute (dbmem_context *ctx, const char *text, int text_len, embedding_result_t *result) {
+    dbmem_embedding_result_t cr = {0};
+    int rc = ctx->custom_provider.compute(ctx->custom_engine, text, text_len, &cr);
+    if (rc != 0) return rc;
+    result->n_tokens = cr.n_tokens;
+    result->n_tokens_truncated = cr.n_tokens_truncated;
+    result->n_embd = cr.n_embd;
+    result->embedding = cr.embedding;
+    return 0;
 }
 
 bool dbmem_context_load_vector (dbmem_context *ctx) {
@@ -898,56 +927,80 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     }
 
     bool is_local_provider = (strcasecmp(provider, DBMEM_LOCAL_PROVIDER) == 0);
-    #ifdef DBMEM_OMIT_LOCAL_ENGINE
-    if (is_local_provider) {
-        sqlite3_result_error(context, "Local provider cannot be set because SQLite-memory was compiled without local provider support", SQLITE_ERROR);
-        return;
+
+    // check if a custom provider matches
+    bool is_custom_provider = (ctx->custom_provider_name && ctx->custom_provider.compute &&
+                               strcasecmp(provider, ctx->custom_provider_name) == 0);
+
+    if (!is_custom_provider) {
+        #ifdef DBMEM_OMIT_LOCAL_ENGINE
+        if (is_local_provider) {
+            sqlite3_result_error(context, "Local provider cannot be set because SQLite-memory was compiled without local provider support", SQLITE_ERROR);
+            return;
+        }
+        #endif
+        #ifdef DBMEM_OMIT_REMOTE_ENGINE
+        if (!is_local_provider) {
+            sqlite3_result_error(context, "Remote provider cannot be set because SQLite-memory was compiled without remote provider support", SQLITE_ERROR);
+            return;
+        }
+        #endif
     }
-    #endif
-    #ifdef DBMEM_OMIT_REMOTE_ENGINE
-    if (!is_local_provider) {
-        sqlite3_result_error(context, "Remote provider cannot be set because SQLite-memory was compiled without remote provider support", SQLITE_ERROR);
-        return;
+
+    // custom provider path
+    if (is_custom_provider) {
+        // free previous custom engine if any
+        if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine);
+        ctx->custom_engine = NULL;
+
+        ctx->custom_engine = ctx->custom_provider.init(model, ctx->api_key, ctx->error_msg);
+        if (ctx->custom_engine == NULL) {
+            sqlite3_result_error(context, ctx->error_msg, -1);
+            return;
+        }
+        ctx->is_custom = true;
+        ctx->is_local = false;
     }
-    #endif
-    
+
     // if provider is local then make sure model file exists
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
-    if (is_local_provider) {
+    if (!is_custom_provider && is_local_provider) {
         if (dbmem_file_exists(model) == false) {
             sqlite3_result_error(context, "Local model not found in the specified path", SQLITE_ERROR);
             return;
         }
-        
+
         if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
         ctx->l_engine = NULL;
-        
+
         ctx->l_engine = dbmem_local_engine_init(ctx, model, ctx->error_msg);
         if (ctx->l_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
         }
-        
+
         if (ctx->engine_warmup) {
             dbmem_local_engine_warmup(ctx->l_engine);
         }
-        
+
         ctx->is_local = true;
+        ctx->is_custom = false;
     }
     #endif
-    
+
     #ifndef DBMEM_OMIT_REMOTE_ENGINE
-    if (!is_local_provider) {
+    if (!is_custom_provider && !is_local_provider) {
         if (ctx->r_engine) dbmem_remote_engine_free(ctx->r_engine);
         ctx->r_engine = NULL;
-        
+
         ctx->r_engine = dbmem_remote_engine_init(ctx, provider, model, ctx->error_msg);
         if (ctx->r_engine == NULL) {
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
         }
-        
+
         ctx->is_local = false;
+        ctx->is_custom = false;
     }
     #endif
     
@@ -1185,7 +1238,12 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
 
     if (!cache_hit) {
         // compute embedding
-        if (ctx->is_local) {
+        if (ctx->is_custom) {
+            rc = dbmem_context_custom_compute(ctx, text, (int)len, &result);
+            if (rc != 0) return rc;
+        }
+
+        else if (ctx->is_local) {
         #ifndef DBMEM_OMIT_LOCAL_ENGINE
             rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
             if (rc != 0) return rc;
@@ -1196,7 +1254,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
         #endif
         }
 
-        if (!ctx->is_local) {
+        else {
         #ifndef DBMEM_OMIT_REMOTE_ENGINE
             rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
             if (rc != 0) return rc;
@@ -1477,6 +1535,45 @@ static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_val
     
 // MARK: -
 
+#define DBMEM_CTX_POINTER_TYPE "dbmem_context_ptr"
+
+// helper to retrieve ctx pointer (registered during init)
+static void dbmem_ctx_ptr (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    UNUSED_PARAM(argv);
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3_result_pointer(context, ctx, DBMEM_CTX_POINTER_TYPE, NULL);
+}
+
+SQLITE_DBMEMORY_API int sqlite3_memory_register_provider (sqlite3 *db, const char *provider_name, const dbmem_provider_t *provider) {
+    if (!db || !provider_name || !provider || !provider->init || !provider->compute) return SQLITE_MISUSE;
+
+    // retrieve dbmem_context from the helper function registered during init
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT _memory_ctx_ptr()", -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    if (sqlite3_step(vm) != SQLITE_ROW) {
+        sqlite3_finalize(vm);
+        return SQLITE_ERROR;
+    }
+    dbmem_context *ctx = (dbmem_context *)sqlite3_value_pointer(sqlite3_column_value(vm, 0), DBMEM_CTX_POINTER_TYPE);
+    sqlite3_finalize(vm);
+    if (!ctx) return SQLITE_ERROR;
+
+    // free previous custom provider if any
+    if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine);
+    ctx->custom_engine = NULL;
+    if (ctx->custom_provider_name) dbmem_free(ctx->custom_provider_name);
+
+    ctx->custom_provider_name = dbmem_strdup(provider_name);
+    if (!ctx->custom_provider_name) return SQLITE_NOMEM;
+
+    ctx->custom_provider = *provider;
+
+    return SQLITE_OK;
+}
+
 SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     #ifndef SQLITE_CORE
     SQLITE_EXTENSION_INIT2(pApi);
@@ -1498,6 +1595,9 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     dbmem_settings_load(db, (dbmem_context *)ctx);
     
     rc = sqlite3_create_function_v2(db, "memory_version", 0, SQLITE_UTF8, ctx, dbmem_version, NULL, NULL, dbmem_context_free);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(db, "_memory_ctx_ptr", 0, SQLITE_UTF8, ctx, dbmem_ctx_ptr, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
     rc = sqlite3_create_function_v2(db, "memory_set_option", 2, SQLITE_UTF8, ctx, dbmem_set_option, NULL, NULL, NULL);

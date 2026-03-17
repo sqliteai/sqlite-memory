@@ -2219,6 +2219,176 @@ TEST(sqlite_memory_delete_context_with_vault) {
 
     sqlite3_close(db);
 }
+// ============================================================================
+// Custom Provider Tests
+// ============================================================================
+
+// Dummy embedding engine for testing
+typedef struct {
+    float embedding[4];
+    int dimension;
+    int compute_count;
+    char api_key[256];
+} dummy_engine_t;
+
+static void *dummy_init(const char *model, const char *api_key, char err_msg[1024]) {
+    UNUSED_PARAM(model);
+    dummy_engine_t *e = (dummy_engine_t *)calloc(1, sizeof(dummy_engine_t));
+    if (!e) { snprintf(err_msg, 1024, "alloc failed"); return NULL; }
+    e->dimension = 4;
+    e->embedding[0] = 0.1f;
+    e->embedding[1] = 0.2f;
+    e->embedding[2] = 0.3f;
+    e->embedding[3] = 0.4f;
+    if (api_key) strncpy(e->api_key, api_key, sizeof(e->api_key) - 1);
+    return e;
+}
+
+static int dummy_compute(void *engine, const char *text, int text_len, dbmem_embedding_result_t *result) {
+    UNUSED_PARAM(text);
+    UNUSED_PARAM(text_len);
+    dummy_engine_t *e = (dummy_engine_t *)engine;
+    e->compute_count++;
+    result->n_tokens = text_len / 4;
+    result->n_tokens_truncated = 0;
+    result->n_embd = e->dimension;
+    result->embedding = e->embedding;
+    return 0;
+}
+
+static void dummy_free(void *engine) {
+    free(engine);
+}
+
+static void *dummy_init_fail(const char *model, const char *api_key, char err_msg[1024]) {
+    UNUSED_PARAM(model);
+    UNUSED_PARAM(api_key);
+    snprintf(err_msg, 1024, "intentional init failure");
+    return NULL;
+}
+
+TEST(sqlite_custom_provider_register) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_set_model) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // set_model should succeed with custom provider
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_add_text) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // add text should use the custom provider to compute embeddings
+    rc = exec_get_int(db, "SELECT memory_add_text('Hello world, this is a test.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    // verify data was stored
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_null_callbacks) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // missing compute should fail
+    dbmem_provider_t prov1 = { .init = dummy_init, .compute = NULL, .free = NULL };
+    int rc = sqlite3_memory_register_provider(db, "bad", &prov1);
+    ASSERT_EQ(rc, SQLITE_MISUSE);
+
+    // missing init should fail
+    dbmem_provider_t prov2 = { .init = NULL, .compute = dummy_compute, .free = NULL };
+    rc = sqlite3_memory_register_provider(db, "bad", &prov2);
+    ASSERT_EQ(rc, SQLITE_MISUSE);
+
+    // NULL provider should fail
+    rc = sqlite3_memory_register_provider(db, "bad", NULL);
+    ASSERT_EQ(rc, SQLITE_MISUSE);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_init_error) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init_fail, .compute = dummy_compute, .free = NULL };
+    int rc = sqlite3_memory_register_provider(db, "failprov", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // set_model should fail because init returns NULL
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_set_model('failprov', 'any');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ERROR);  // should be an error
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_apikey_passed) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // set API key first
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_apikey('test-key-123');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // verify the ctx pointer function returns a valid pointer
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT _memory_ctx_ptr();", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    void *ptr = sqlite3_value_pointer(sqlite3_column_value(stmt, 0), "dbmem_context_ptr");
+    ASSERT(ptr != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
 #endif // TEST_SQLITE_EXTENSION
 
 // ============================================================================
@@ -2346,6 +2516,14 @@ int main(int argc, char *argv[]) {
 
     printf("\nSearch oversampling tests:\n");
     RUN_TEST(sqlite_search_oversample_setting);
+
+    printf("\nCustom provider tests:\n");
+    RUN_TEST(sqlite_custom_provider_register);
+    RUN_TEST(sqlite_custom_provider_set_model);
+    RUN_TEST(sqlite_custom_provider_add_text);
+    RUN_TEST(sqlite_custom_provider_null_callbacks);
+    RUN_TEST(sqlite_custom_provider_init_error);
+    RUN_TEST(sqlite_custom_provider_apikey_passed);
 #endif
 
     printf("\n=== Results ===\n");

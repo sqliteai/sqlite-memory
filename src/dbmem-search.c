@@ -603,10 +603,18 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     
     // compute embedding
     embedding_result_t result = {0};
-    
+
     rc = SQLITE_MISUSE;
+    if (dbmem_context_is_custom(ctx)) {
+        rc = dbmem_context_custom_compute(ctx, query, (int)strlen(query), &result);
+        if (rc != 0) {
+            sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_context_errmsg(ctx));
+            return SQLITE_ERROR;
+        }
+    }
+
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
-    if (is_local) {
+    else if (is_local) {
         rc = dbmem_local_compute_embedding((dbmem_local_engine_t *)engine, query, (int)strlen(query), &result);
         if (rc != 0) {
             sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_context_errmsg(ctx));
@@ -614,9 +622,9 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
         }
     }
     #endif
-    
+
     #ifndef DBMEM_OMIT_REMOTE_ENGINE
-    if (!is_local) {
+    else if (!is_local) {
         rc = dbmem_remote_compute_embedding((dbmem_remote_engine_t *)engine, query, (int)strlen(query), &result);
         if (rc != 0) {
             sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_context_errmsg(ctx));
@@ -624,7 +632,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
         }
     }
     #endif
-    
+
     if (rc == SQLITE_MISUSE) {
         sqlvTab->zErrMsg = sqlite3_mprintf("%s", "Unable to obtain a valid embedding engine");
         return SQLITE_ERROR;
