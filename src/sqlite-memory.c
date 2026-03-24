@@ -279,7 +279,7 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_PROVIDER) == 0) {
         char *provider = dbmem_strdup((const char *)sqlite3_value_text(value));
         if (provider) {
-            if (ctx->provider) dbmem_free(ctx->provider);
+            if (ctx->provider) dbmemory_free(ctx->provider);
             ctx->provider = provider;
         }
         return 0;
@@ -288,7 +288,7 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_MODEL) == 0) {
         char *model = dbmem_strdup((const char *)sqlite3_value_text(value));
         if (model) {
-            if (ctx->model) dbmem_free(ctx->model);
+            if (ctx->model) dbmemory_free(ctx->model);
             ctx->model = model;
         }
         return 0;
@@ -297,7 +297,7 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_EXTENSIONS) == 0) {
         char *extensions = dbmem_strdup((const char *)sqlite3_value_text(value));
         if (extensions) {
-            if (ctx->extensions) dbmem_free(ctx->extensions);
+            if (ctx->extensions) dbmemory_free(ctx->extensions);
             ctx->extensions = extensions;
         }
         return 0;
@@ -537,7 +537,7 @@ static int dbmem_database_rollback_transaction (sqlite3 *db) {
 // MARK: - Context -
 
 static void *dbmem_context_create (sqlite3 *db) {
-    dbmem_context *ctx = (dbmem_context *)dbmem_zeroalloc(sizeof(dbmem_context));
+    dbmem_context *ctx = (dbmem_context *)dbmemory_zeroalloc(sizeof(dbmem_context));
     if (!ctx) return NULL;
     
     ctx->db = db;
@@ -564,15 +564,15 @@ static void dbmem_context_free (void *ptr) {
     if (!ptr) return;
     dbmem_context *ctx = (dbmem_context *)ptr;
 
-    if (ctx->provider) dbmem_free(ctx->provider);
-    if (ctx->model) dbmem_free(ctx->model);
-    if (ctx->api_key) dbmem_free(ctx->api_key);
-    if (ctx->extensions) dbmem_free(ctx->extensions);
-    if (ctx->cache_buffer) dbmem_free(ctx->cache_buffer);
+    if (ctx->provider) dbmemory_free(ctx->provider);
+    if (ctx->model) dbmemory_free(ctx->model);
+    if (ctx->api_key) dbmemory_free(ctx->api_key);
+    if (ctx->extensions) dbmemory_free(ctx->extensions);
+    if (ctx->cache_buffer) dbmemory_free(ctx->cache_buffer);
 
     // custom provider
     if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine, ctx->custom_provider.xdata);
-    if (ctx->custom_provider_name) dbmem_free(ctx->custom_provider_name);
+    if (ctx->custom_provider_name) dbmemory_free(ctx->custom_provider_name);
 
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
     if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
@@ -582,7 +582,7 @@ static void dbmem_context_free (void *ptr) {
     if (ctx->r_engine) dbmem_remote_engine_free(ctx->r_engine);
     #endif
 
-    dbmem_free(ctx);
+    dbmemory_free(ctx);
 }
 
 static void dbmem_context_reset_temp_values (dbmem_context *ctx) {
@@ -1039,7 +1039,7 @@ static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value 
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
     
-    if (ctx->api_key) dbmem_free(ctx->api_key);
+    if (ctx->api_key) dbmemory_free(ctx->api_key);
     ctx->api_key = apikey;
     
     sqlite3_result_int(context, 1);
@@ -1150,7 +1150,7 @@ static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embeddin
 
     // ensure cache_buffer is large enough
     if (ctx->cache_buffer_size < dimension) {
-        float *new_buf = (float *)dbmem_realloc(ctx->cache_buffer, dimension * sizeof(float));
+        float *new_buf = (float *)dbmemory_realloc(ctx->cache_buffer, dimension * sizeof(float));
         if (!new_buf) goto cleanup;
         ctx->cache_buffer = new_buf;
         ctx->cache_buffer_size = dimension;
@@ -1361,7 +1361,7 @@ static int dbmem_process_file (dbmem_context *ctx, const char *path) {
     // do real processing
     ctx->path = path;
     int rc = dbmem_process_buffer(ctx, buffer, len);
-    dbmem_free(buffer);
+    dbmemory_free(buffer);
     
     DEBUG_DBMEM("%*d\t%s", 4, (int)ctx->counter, path);
     return rc;
@@ -1564,7 +1564,7 @@ SQLITE_DBMEMORY_API int sqlite3_memory_register_provider (sqlite3 *db, const cha
     // free previous custom provider if any
     if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine, ctx->custom_provider.xdata);
     ctx->custom_engine = NULL;
-    if (ctx->custom_provider_name) dbmem_free(ctx->custom_provider_name);
+    if (ctx->custom_provider_name) dbmemory_free(ctx->custom_provider_name);
 
     ctx->custom_provider_name = dbmem_strdup(provider_name);
     if (!ctx->custom_provider_name) return SQLITE_NOMEM;

@@ -216,27 +216,27 @@ char *dbmem_uuid_v7 (char value[DBMEM_UUID_STR_MAXLEN]) {
 }
 
 // MARK: - MEMORY -
-void *dbmem_alloc (uint64_t size) {
+void *dbmemory_alloc (uint64_t size) {
     return sqlite3_malloc64((sqlite3_uint64)size);
 }
 
-void *dbmem_zeroalloc (uint64_t size) {
-    void *ptr = (void *)dbmem_alloc(size);
+void *dbmemory_zeroalloc (uint64_t size) {
+    void *ptr = (void *)dbmemory_alloc(size);
     if (!ptr) return NULL;
     
     memset(ptr, 0, (size_t)size);
     return ptr;
 }
 
-void *dbmem_realloc (void *ptr, uint64_t new_size) {
+void *dbmemory_realloc (void *ptr, uint64_t new_size) {
     return sqlite3_realloc64(ptr, (sqlite3_uint64)new_size);
 }
 
-void dbmem_free (void *ptr) {
+void dbmemory_free (void *ptr) {
     sqlite3_free(ptr);
 }
 
-uint64_t dbmem_size (void *ptr) {
+uint64_t dbmemory_size (void *ptr) {
     return (uint64_t)sqlite3_msize(ptr);
 }
 
@@ -244,7 +244,7 @@ char *dbmem_strdup (const char *s) {
     if (!s) return NULL;
 
     size_t len = strlen(s);
-    char *copy = (char *)dbmem_alloc((uint64_t)(len + 1));
+    char *copy = (char *)dbmemory_alloc((uint64_t)(len + 1));
     if (!copy) return NULL;
 
     memcpy(copy, s, len + 1);  // Include null terminator
@@ -311,7 +311,7 @@ char *dbmem_file_read (const char *path, int64_t *len) {
     // Guard against huge files that don't fit in size_t
     if ((int64_t)sz != isz) goto abort_read;
 
-    buffer = (char *)dbmem_alloc(sz + 1);
+    buffer = (char *)dbmemory_alloc(sz + 1);
     if (!buffer) goto abort_read;
     buffer[sz] = '\0';
 
@@ -323,7 +323,7 @@ char *dbmem_file_read (const char *path, int64_t *len) {
 
 abort_read:
     saved_errno = errno;  // Save errno before cleanup calls modify it
-    if (buffer) dbmem_free(buffer);
+    if (buffer) dbmemory_free(buffer);
     if (fd >= 0) file_close(fd);
     DEBUG_DBMEM("file_read: failed to read '%s': %s", path ? path : "(null)", strerror(saved_errno));
     (void)saved_errno;  // Suppress unused warning when DEBUG_DBMEM is disabled

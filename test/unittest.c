@@ -1818,7 +1818,7 @@ TEST(sqlite_sync_directory_removes_deleted) {
     char *buf = dbmem_file_read(file_keep, &len);
     ASSERT(buf != NULL);
     uint64_t keep_hash = dbmem_hash_compute(buf, (size_t)len);
-    dbmem_free(buf);
+    dbmemory_free(buf);
 
     int rc = insert_fake_content(db, (sqlite3_int64)keep_hash, file_keep, NULL, len);
     ASSERT_EQ(rc, SQLITE_OK);

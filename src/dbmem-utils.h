@@ -35,11 +35,11 @@
 #define DBMEM_UUID_STR_MAXLEN               37
 
 // MEMORY
-void     *dbmem_alloc (uint64_t size);
-void     *dbmem_zeroalloc (uint64_t size);
-void     *dbmem_realloc (void *ptr, uint64_t new_size);
-void      dbmem_free (void *ptr);
-uint64_t  dbmem_size (void *ptr);
+void     *dbmemory_alloc (uint64_t size);
+void     *dbmemory_zeroalloc (uint64_t size);
+void     *dbmemory_realloc (void *ptr, uint64_t new_size);
+void      dbmemory_free (void *ptr);
+uint64_t  dbmemory_size (void *ptr);
 char     *dbmem_strdup (const char *s);
 
 // IO

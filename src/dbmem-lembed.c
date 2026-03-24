@@ -101,7 +101,7 @@ void dbmem_logger (enum ggml_log_level level, const char *text, void *user_data)
 // MARK: -
 
 dbmem_local_engine_t *dbmem_local_engine_init (void *ctx, const char *model_path, char err_msg[DBMEM_ERRBUF_SIZE]) {
-    dbmem_local_engine_t *engine = (dbmem_local_engine_t *)dbmem_zeroalloc(sizeof(dbmem_local_engine_t));
+    dbmem_local_engine_t *engine = (dbmem_local_engine_t *)dbmemory_zeroalloc(sizeof(dbmem_local_engine_t));
     if (!engine) return NULL;
     
     // set logger
@@ -153,14 +153,14 @@ dbmem_local_engine_t *dbmem_local_engine_init (void *ctx, const char *model_path
 
     // Allocate token buffer
     engine->tokens_capacity = engine->n_ctx;
-    engine->tokens = (llama_token *)dbmem_alloc(sizeof(llama_token) * engine->tokens_capacity);
+    engine->tokens = (llama_token *)dbmemory_alloc(sizeof(llama_token) * engine->tokens_capacity);
     if (!engine->tokens) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Failed to allocate token buffer");
         goto cleanup;
     }
 
     // Allocate single embedding buffer
-    engine->embedding = (float *)dbmem_alloc(sizeof(float) * engine->n_embd);
+    engine->embedding = (float *)dbmemory_alloc(sizeof(float) * engine->n_embd);
     if (!engine->embedding) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Failed to allocate embedding buffer");
         goto cleanup;
@@ -284,11 +284,11 @@ void dbmem_local_engine_free (dbmem_local_engine_t *engine) {
     if (!engine) return;
 
     if (engine->embedding) {
-        dbmem_free(engine->embedding);
+        dbmemory_free(engine->embedding);
         engine->embedding = NULL;
     }
     if (engine->tokens) {
-        dbmem_free(engine->tokens);
+        dbmemory_free(engine->tokens);
         engine->tokens = NULL;
     }
     if (engine->ctx) {

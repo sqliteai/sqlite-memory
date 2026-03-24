@@ -117,7 +117,7 @@ static int section_push (parse_ctx_t *ctx, size_t start, size_t end, int is_head
     
     if (ctx->sec_count >= ctx->sec_cap) {
         size_t new_cap = ctx->sec_cap ? ctx->sec_cap * 2 : 16;
-        section_t *tmp = (section_t *)dbmem_realloc(ctx->sections, new_cap * sizeof(section_t));
+        section_t *tmp = (section_t *)dbmemory_realloc(ctx->sections, new_cap * sizeof(section_t));
         if (!tmp) return -1;
         ctx->sections = tmp;
         ctx->sec_cap = new_cap;
@@ -388,7 +388,7 @@ static void process_inline (strip_ctx_t *ctx, const char *start, const char *end
 
 // Main markdown stripping function
 static char *strip_markdown (const char *src, size_t len, size_t *out_len, bool skip_html) {
-    char *buf = (char *)dbmem_alloc(len + 1);
+    char *buf = (char *)dbmemory_alloc(len + 1);
     if (!buf) return NULL;
 
     strip_ctx_t ctx = {
@@ -592,7 +592,7 @@ static int parse_sections (const char *buffer, size_t buffer_size, bool skip_sem
     parser.text = cb_text;
 
     if (md_parse(buffer, (MD_SIZE)buffer_size, &parser, ctx) != 0) {
-        dbmem_free(ctx->sections);
+        dbmemory_free(ctx->sections);
         ctx->sections = NULL;
         return -1;
     }
@@ -637,7 +637,7 @@ static int strip_sections (parse_ctx_t *ctx, const char *buffer, bool skip_html)
         if (!s->text) {
             // Free previously allocated texts and set to NULL to avoid double-free
             for (size_t j = 0; j < i; j++) {
-                dbmem_free(ctx->sections[j].text);
+                dbmemory_free(ctx->sections[j].text);
                 ctx->sections[j].text = NULL;
             }
             return -1;
@@ -650,9 +650,9 @@ static int strip_sections (parse_ctx_t *ctx, const char *buffer, bool skip_html)
 static void free_sections (parse_ctx_t *ctx) {
     if (ctx->sections) {
         for (size_t i = 0; i < ctx->sec_count; i++) {
-            dbmem_free(ctx->sections[i].text);
+            dbmemory_free(ctx->sections[i].text);
         }
-        dbmem_free(ctx->sections);
+        dbmemory_free(ctx->sections);
         ctx->sections = NULL;
     }
     ctx->sec_count = ctx->sec_cap = 0;
@@ -663,7 +663,7 @@ static void free_sections (parse_ctx_t *ctx) {
 // Build raw chunks by splitting sections that exceed max_chars
 static int build_raw_chunks (parse_ctx_t *ctx, size_t max_chars, raw_chunk_t **out_chunks, size_t *out_count) {
     size_t cap = 16, count = 0;
-    raw_chunk_t *chunks = (raw_chunk_t *)dbmem_alloc(cap * sizeof(raw_chunk_t));
+    raw_chunk_t *chunks = (raw_chunk_t *)dbmemory_alloc(cap * sizeof(raw_chunk_t));
     if (!chunks) return -1;
 
     for (size_t i = 0; i < ctx->sec_count; i++) {
@@ -673,8 +673,8 @@ static int build_raw_chunks (parse_ctx_t *ctx, size_t max_chars, raw_chunk_t **o
             // Fits in one chunk
             if (count >= cap) {
                 cap *= 2;
-                raw_chunk_t *tmp = (raw_chunk_t *)dbmem_realloc(chunks, cap * sizeof(raw_chunk_t));
-                if (!tmp) { dbmem_free(chunks); return -1; }
+                raw_chunk_t *tmp = (raw_chunk_t *)dbmemory_realloc(chunks, cap * sizeof(raw_chunk_t));
+                if (!tmp) { dbmemory_free(chunks); return -1; }
                 chunks = tmp;
             }
             chunks[count++] = (raw_chunk_t){ i, 0, tlen };
@@ -686,8 +686,8 @@ static int build_raw_chunks (parse_ctx_t *ctx, size_t max_chars, raw_chunk_t **o
                 size_t split = find_split(ctx->sections[i].text + pos, remaining, max_chars);
                 if (count >= cap) {
                     cap *= 2;
-                    raw_chunk_t *tmp = (raw_chunk_t *)dbmem_realloc(chunks, cap * sizeof(raw_chunk_t));
-                    if (!tmp) { dbmem_free(chunks); return -1; }
+                    raw_chunk_t *tmp = (raw_chunk_t *)dbmemory_realloc(chunks, cap * sizeof(raw_chunk_t));
+                    if (!tmp) { dbmemory_free(chunks); return -1; }
                     chunks = tmp;
                 }
                 chunks[count++] = (raw_chunk_t){ i, pos, split };
@@ -708,7 +708,7 @@ static char *build_chunk_text (parse_ctx_t *ctx, raw_chunk_t *raw, char *prev_te
 
     if (prev_text == NULL || overlay_chars == 0) {
         // No overlay
-        char *text = (char *)dbmem_alloc(src_len + 1);
+        char *text = (char *)dbmemory_alloc(src_len + 1);
         if (!text) return NULL;
         memcpy(text, src_text, src_len);
         text[src_len] = '\0';
@@ -728,7 +728,7 @@ static char *build_chunk_text (parse_ctx_t *ctx, raw_chunk_t *raw, char *prev_te
     size_t ov_len = prev_len - ov_start;
     size_t total = ov_len + (ov_len > 0 ? 1 : 0) + src_len;
 
-    char *text = (char *)dbmem_alloc(total + 1);
+    char *text = (char *)dbmemory_alloc(total + 1);
     if (!text) return NULL;
 
     size_t wp = 0;
@@ -787,8 +787,8 @@ int dbmem_parse (const char *md, size_t md_len, dbmem_parse_settings *settings) 
         size_t chunk_len;
         char *chunk_text = build_chunk_text(&ctx, raw, prev_text, prev_len, overlay_chars, &chunk_len);
         if (!chunk_text) {
-            dbmem_free(prev_text);
-            dbmem_free(raw_chunks);
+            dbmemory_free(prev_text);
+            dbmemory_free(raw_chunks);
             free_sections(&ctx);
             return -1;
         }
@@ -815,14 +815,14 @@ int dbmem_parse (const char *md, size_t md_len, dbmem_parse_settings *settings) 
         }
 
         // Keep this chunk's text for next iteration's overlay
-        dbmem_free(prev_text);
+        dbmemory_free(prev_text);
         prev_text = chunk_text;
         prev_len = chunk_len;
     }
 
     // Cleanup
-    dbmem_free(prev_text);
-    dbmem_free(raw_chunks);
+    dbmemory_free(prev_text);
+    dbmemory_free(raw_chunks);
     free_sections(&ctx);
 
     return rc;

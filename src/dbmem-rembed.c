@@ -197,25 +197,25 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
         return NULL;
     }
 
-    dbmem_remote_engine_t *engine = (dbmem_remote_engine_t *)dbmem_zeroalloc(sizeof(dbmem_remote_engine_t));
+    dbmem_remote_engine_t *engine = (dbmem_remote_engine_t *)dbmemory_zeroalloc(sizeof(dbmem_remote_engine_t));
     if (!engine) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to allocate memory for the remote embedding engine");
         return NULL;
     }
 
     // init internal buffers (data and request)
-    char *data = dbmem_alloc(DEFAULT_BUFFER_SIZE);
+    char *data = dbmemory_alloc(DEFAULT_BUFFER_SIZE);
     if (!data) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to allocate memory for the default buffer (1)");
         dbmem_remote_engine_free(engine);
         return NULL;
     }
 
-    char *request = dbmem_alloc(DEFAULT_BUFFER_SIZE);
+    char *request = dbmemory_alloc(DEFAULT_BUFFER_SIZE);
     if (!request) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to allocate memory for the default buffer (2)");
         dbmem_remote_engine_free(engine);
-        dbmem_free(data);
+        dbmemory_free(data);
         return NULL;
     }
 
@@ -224,8 +224,8 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
     if (!_provider) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to duplicate provider name (insufficient memory)");
         dbmem_remote_engine_free(engine);
-        dbmem_free(request);
-        dbmem_free(data);
+        dbmemory_free(request);
+        dbmemory_free(data);
         return NULL;
     }
 
@@ -233,9 +233,9 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
     if (!_model) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to duplicate model name (insufficient memory)");
         dbmem_remote_engine_free(engine);
-        dbmem_free(request);
-        dbmem_free(data);
-        dbmem_free(_provider);
+        dbmemory_free(request);
+        dbmemory_free(data);
+        dbmemory_free(_provider);
         return NULL;
     }
 
@@ -244,10 +244,10 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
     CURL *curl = curl_easy_init();
     if (!curl) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Failed to initialize curl");
-        dbmem_free(data);
-        dbmem_free(request);
-        dbmem_free(_provider);
-        dbmem_free(_model);
+        dbmemory_free(data);
+        dbmemory_free(request);
+        dbmemory_free(_provider);
+        dbmemory_free(_model);
         dbmem_remote_engine_free(engine);
         return NULL;
     }
@@ -271,10 +271,10 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
     if (!headers) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Failed to allocate HTTP headers");
         curl_easy_cleanup(curl);
-        dbmem_free(data);
-        dbmem_free(request);
-        dbmem_free(_provider);
-        dbmem_free(_model);
+        dbmemory_free(data);
+        dbmemory_free(request);
+        dbmemory_free(_provider);
+        dbmemory_free(_model);
         dbmem_remote_engine_free(engine);
         return NULL;
     }
@@ -286,10 +286,10 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
     char *_api_key = dbmem_strdup(api_key);
     if (!_api_key) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to duplicate API key (insufficient memory)");
-        dbmem_free(data);
-        dbmem_free(request);
-        dbmem_free(_provider);
-        dbmem_free(_model);
+        dbmemory_free(data);
+        dbmemory_free(request);
+        dbmemory_free(_provider);
+        dbmemory_free(_model);
         dbmem_remote_engine_free(engine);
         return NULL;
     }
@@ -326,10 +326,10 @@ static size_t dbmem_remote_receive_data (void *contents, size_t size, size_t nme
     size_t required = engine->data_size + real_size + 1;
     if (required > engine->data_capacity) {
         size_t new_capacity = required * 2;
-        char *new_data = dbmem_alloc(new_capacity);
+        char *new_data = dbmemory_alloc(new_capacity);
         if (!new_data) return 0;
         memcpy(new_data, engine->data, engine->data_size);
-        dbmem_free(engine->data);
+        dbmemory_free(engine->data);
         engine->data = new_data;
         engine->data_capacity = new_capacity;
     }
@@ -355,13 +355,13 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     size_t model_len = strlen(engine->model);
     if (engine->request_capacity < len + provider_len + model_len + 128) {
         size_t new_size = len + provider_len + model_len + 1024;
-        char *new_request = dbmem_alloc(new_size);
+        char *new_request = dbmemory_alloc(new_size);
         if (!new_request) {
             dbmem_context_set_error(engine->context, "Unable to allocate request buffer");
             return -1;
         }
 
-        dbmem_free(engine->request);
+        dbmemory_free(engine->request);
         engine->request = new_request;
         engine->request_capacity = new_size;
     }
@@ -412,13 +412,13 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     // copy response into engine's data buffer
     if (response_size + 1 > engine->data_capacity) {
         size_t new_capacity = (response_size + 1) * 2;
-        char *new_data = dbmem_alloc(new_capacity);
+        char *new_data = dbmemory_alloc(new_capacity);
         if (!new_data) {
             free(response_data);
             dbmem_context_set_error(engine->context, "Unable to allocate response buffer");
             return -1;
         }
-        dbmem_free(engine->data);
+        dbmemory_free(engine->data);
         engine->data = new_data;
         engine->data_capacity = new_capacity;
     }
@@ -443,8 +443,8 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
 
     // grow tokens buffer if needed
     if (engine->tokens_capacity < ntokens) {
-        if (engine->tokens) dbmem_free(engine->tokens);
-        engine->tokens = (jsmntok_t *)dbmem_alloc(sizeof(jsmntok_t) * ntokens);
+        if (engine->tokens) dbmemory_free(engine->tokens);
+        engine->tokens = (jsmntok_t *)dbmemory_alloc(sizeof(jsmntok_t) * ntokens);
         if (!engine->tokens) {
             dbmem_context_set_error(engine->context, "Unable to allocate JSON tokens");
             return -1;
@@ -487,8 +487,8 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
 
     // allocate/grow embedding buffer
     if (engine->embedding_capacity < (size_t)emb_count) {
-        if (engine->embedding) dbmem_free(engine->embedding);
-        engine->embedding = (float *)dbmem_alloc(sizeof(float) * emb_count);
+        if (engine->embedding) dbmemory_free(engine->embedding);
+        engine->embedding = (float *)dbmemory_alloc(sizeof(float) * emb_count);
         if (!engine->embedding) {
             dbmem_context_set_error(engine->context, "Unable to allocate embedding buffer");
             return -1;
@@ -521,13 +521,13 @@ void dbmem_remote_engine_free (dbmem_remote_engine_t *engine) {
     if (engine->headers) curl_slist_free_all(engine->headers);
     if (engine->curl) curl_easy_cleanup(engine->curl);
 #else
-    if (engine->api_key) dbmem_free(engine->api_key);
+    if (engine->api_key) dbmemory_free(engine->api_key);
 #endif
-    if (engine->provider) dbmem_free(engine->provider);
-    if (engine->model) dbmem_free(engine->model);
-    if (engine->data) dbmem_free(engine->data);
-    if (engine->request) dbmem_free(engine->request);
-    if (engine->embedding) dbmem_free(engine->embedding);
-    if (engine->tokens) dbmem_free(engine->tokens);
-    dbmem_free(engine);
+    if (engine->provider) dbmemory_free(engine->provider);
+    if (engine->model) dbmemory_free(engine->model);
+    if (engine->data) dbmemory_free(engine->data);
+    if (engine->request) dbmemory_free(engine->request);
+    if (engine->embedding) dbmemory_free(engine->embedding);
+    if (engine->tokens) dbmemory_free(engine->tokens);
+    dbmemory_free(engine);
 }

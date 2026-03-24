@@ -115,7 +115,7 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     size += sizeof(sqlite3_int64) * entries;        // hash
     size += sizeof(sqlite3_int64) * entries;        // seq
 
-    char *buffer = (char *)dbmem_zeroalloc(size);
+    char *buffer = (char *)dbmemory_zeroalloc(size);
     if (!buffer) return SQLITE_NOMEM;
 
     // adjust all internal pointers
@@ -279,7 +279,7 @@ static void vMemorySearchUpdateAccess(sqlite3 *db, vMemorySearchCursor *c) {
 // MARK: - SEARCH -
 
 static char *dbmem_fts_query_normalize (const char *query) {
-    char *result = (char *)dbmem_zeroalloc(strlen(query) + 1);
+    char *result = (char *)dbmemory_zeroalloc(strlen(query) + 1);
     if (!result) return NULL;
 
     // Only the following characters can be part of the FTS5 query
@@ -364,7 +364,7 @@ static int dbmem_fts_search (sqlite3 *db, vMemorySearchCursor *c, const char *in
     
 cleanup:
     if (rc != SQLITE_OK) DEBUG_DBMEM("Error in dbmem_fts_search: %s", sqlite3_errmsg(db));
-    if (query) dbmem_free(query);
+    if (query) dbmemory_free(query);
     if (vm) sqlite3_finalize(vm);
     return rc;
 }
@@ -435,7 +435,7 @@ static int vMemorySearchConnect (sqlite3 *db, void *pAux, int argc, const char *
     int rc = sqlite3_declare_vtab(db, "CREATE TABLE x(query hidden, max_entries hidden, context hidden, hash, seq, ranking, path, snippet);");
     if (rc != SQLITE_OK) return rc;
     
-    vMemorySearchTable *vtab = (vMemorySearchTable *)dbmem_zeroalloc(sizeof(vMemorySearchTable));
+    vMemorySearchTable *vtab = (vMemorySearchTable *)dbmemory_zeroalloc(sizeof(vMemorySearchTable));
     if (!vtab) return SQLITE_NOMEM;
     
     vtab->db = db;
@@ -447,7 +447,7 @@ static int vMemorySearchConnect (sqlite3 *db, void *pAux, int argc, const char *
 
 static int vMemorySearchDisconnect (sqlite3_vtab *pVtab) {
     vMemorySearchTable *vtab = (vMemorySearchTable *)pVtab;
-    dbmem_free(vtab);
+    dbmemory_free(vtab);
     return SQLITE_OK;
 }
 
@@ -481,7 +481,7 @@ static int vMemorySearchBestIndex (sqlite3_vtab *tab, sqlite3_index_info *pIdxIn
 }
 
 static int vMemorySearchCursorOpen (sqlite3_vtab *pVtab, sqlite3_vtab_cursor **ppCursor){
-    vMemorySearchCursor *c = (vMemorySearchCursor *)dbmem_zeroalloc(sizeof(vMemorySearchCursor));
+    vMemorySearchCursor *c = (vMemorySearchCursor *)dbmemory_zeroalloc(sizeof(vMemorySearchCursor));
     if (!c) return SQLITE_NOMEM;
     
     *ppCursor = (sqlite3_vtab_cursor *)c;
@@ -490,8 +490,8 @@ static int vMemorySearchCursorOpen (sqlite3_vtab *pVtab, sqlite3_vtab_cursor **p
 
 static int vMemorySearchCursorClose (sqlite3_vtab_cursor *cur){
     vMemorySearchCursor *c = (vMemorySearchCursor *)cur;
-    if (c->buffer) dbmem_free(c->buffer);
-    dbmem_free(c);
+    if (c->buffer) dbmemory_free(c->buffer);
+    dbmemory_free(c);
     return SQLITE_OK;
 }
 
