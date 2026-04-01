@@ -428,7 +428,7 @@ jobs:
           name: memory-${{ matrix.name }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
           path: |
             dist/memory.*
-            dist/memory-*.xcframework
+            dist/memory-*.xcframework.zip
           if-no-files-found: error
 
   release:
