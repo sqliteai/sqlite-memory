@@ -641,7 +641,7 @@ FMWK_NAMES = ios-arm64 ios-arm64_x86_64-simulator macos-arm64_x86_64
 XCFRAMEWORK_LLAMA = LLAMA="-DGGML_NATIVE=OFF -DGGML_METAL=ON -DGGML_ACCELERATE=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Apple"
 
 define create_xcframework
-	@$(foreach i,1 2 3,\
+	@$(foreach i,1 2,\
 		prefix=$(word $(i),$(LIB_PREFIXES)); \
 		fmwk=$(word $(i),$(FMWK_NAMES)); \
 		mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Headers; \
@@ -652,6 +652,21 @@ define create_xcframework
 		mv $(DIST_DIR)/$${prefix}$(1).dylib $(DIST_DIR)/$$fmwk/memory.framework/memory; \
 		install_name_tool -id "@rpath/memory.framework/memory" $(DIST_DIR)/$$fmwk/memory.framework/memory; \
 	)
+	@prefix=$(word 3,$(LIB_PREFIXES)); \
+	fmwk=$(word 3,$(FMWK_NAMES)); \
+	mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/Headers; \
+	mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/Modules; \
+	mkdir -p $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/Resources; \
+	cp src/sqlite-memory.h $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/Headers; \
+	printf "$(PLIST)" > $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/Resources/Info.plist; \
+	printf "$(MODULEMAP)" > $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/Modules/module.modulemap; \
+	mv $(DIST_DIR)/$${prefix}$(1).dylib $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/memory; \
+	install_name_tool -id "@rpath/memory.framework/memory" $(DIST_DIR)/$$fmwk/memory.framework/Versions/A/memory; \
+	ln -sf A $(DIST_DIR)/$$fmwk/memory.framework/Versions/Current; \
+	ln -sf Versions/Current/memory $(DIST_DIR)/$$fmwk/memory.framework/memory; \
+	ln -sf Versions/Current/Headers $(DIST_DIR)/$$fmwk/memory.framework/Headers; \
+	ln -sf Versions/Current/Modules $(DIST_DIR)/$$fmwk/memory.framework/Modules; \
+	ln -sf Versions/Current/Resources $(DIST_DIR)/$$fmwk/memory.framework/Resources;
 	xcodebuild -create-xcframework $(foreach fmwk,$(FMWK_NAMES),-framework $(DIST_DIR)/$(fmwk)/memory.framework) -output $(DIST_DIR)/$(2).xcframework
 	rm -rf $(foreach fmwk,$(FMWK_NAMES),$(DIST_DIR)/$(fmwk))
 endef

@@ -334,7 +334,7 @@ jobs:
             codesign --sign "${{ secrets.APPLE_TEAM_ID }}" --timestamp --options runtime dist/memory-${variant}.xcframework
             ditto -c -k --keepParent dist/memory-${variant}.xcframework dist/memory-${variant}.xcframework.zip
             xcrun notarytool submit dist/memory-${variant}.xcframework.zip --apple-id "${{ secrets.APPLE_ID }}" --password "${{ secrets.APPLE_PASSWORD }}" --team-id "${{ secrets.APPLE_TEAM_ID }}" --wait
-            rm dist/memory-${variant}.xcframework.zip
+            rm -rf dist/memory-${variant}.xcframework
           done
 
       - name: cleanup keychain for codesign
@@ -456,7 +456,9 @@ jobs:
               name=$(basename "$folder")
               if [[ "$name" == "memory-apple-xcframework" ]]; then
                 for variant in remote local full; do
-                  (cd "$folder" && zip -rq "../../memory-apple-xcframework-${variant}-${VERSION}.zip" memory-${variant}.xcframework)
+                  # Use the ditto-created zip that preserves macOS symlinks and extract for other steps
+                  cp "$folder/memory-${variant}.xcframework.zip" "memory-apple-xcframework-${variant}-${VERSION}.zip"
+                  unzip -q "$folder/memory-${variant}.xcframework.zip" -d "$folder/"
                 done
               elif [[ "$name" == "memory-android-aar" ]]; then
                 cp "$folder"/*.aar "${name}-${VERSION}.aar"
