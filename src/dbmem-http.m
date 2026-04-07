@@ -7,8 +7,8 @@
 
 #import <Foundation/Foundation.h>
 #include "dbmem-http.h"
+#include "sqlite-memory.h"
 #include <string.h>
-#include <stdlib.h>
 
 int dbmem_http_post(const char *url, const char *api_key, const char *body,
                     void **out_data, size_t *out_size, long *out_http_code,
@@ -53,7 +53,7 @@ int dbmem_http_post(const char *url, const char *api_key, const char *body,
 
         *out_http_code = httpResponse.statusCode;
         *out_size = responseData.length;
-        *out_data = malloc(responseData.length + 1);
+        *out_data = sqlite3_malloc64(responseData.length + 1);
         if (!*out_data) {
             snprintf(err_msg, err_msg_size, "Failed to allocate response buffer");
             return -1;

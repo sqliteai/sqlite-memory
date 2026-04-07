@@ -1,6 +1,8 @@
 # SQLite Memory
 
-A SQLite extension that gives AI agents persistent, searchable memory. Features hybrid semantic search (vector similarity + FTS5), markdown-aware chunking, and local embedding via llama.cpp. Memory databases can be synced between agents using **offline first technology** each agent works independently and syncs when connected, making it ideal for distributed AI systems, edge deployments, and collaborative agent architectures.
+A SQLite extension that gives AI agents persistent, searchable memory, optimized for markdown content. Features hybrid semantic search (vector similarity + FTS5), markdown-aware chunking, and local embedding via llama.cpp.
+
+Agent memory databases can be synchronized between agents using **offline-first technology** via [sqlite-sync](https://github.com/sqliteai/sqlite-sync). Each agent works independently and syncs when connected, making it ideal for distributed AI systems, edge deployments, and collaborative agent architectures.
 
 ## The Future of AI Agent Memory
 
@@ -33,10 +35,10 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 
 - **Hybrid Search**: Combines vector similarity (cosine distance) with FTS5 full-text search for superior retrieval
 - **Smart Chunking**: Markdown-aware parsing preserves semantic boundaries
-- **Intelligent Sync**: Content-hash change detection, unchanged files are skipped, modified files are atomically replaced, deleted files are cleaned up
-- **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction, either fully succeeds or fully rolls back, no partially-indexed content
+- **Intelligent Sync**: Content-hash change detection skips unchanged files, atomically replaces modified ones, and cleans up deleted ones
+- **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction - either fully succeeds or fully rolls back, no partially-indexed content
 - **Efficient Storage**: Binary embeddings with configurable dimensions
-- **Embedding Cache**: Automatically caches computed embeddings so re-indexing the same text skips redundant API calls and computation
+- **Embedding Cache**: Automatically caches computed embeddings, so re-indexing the same text skips redundant API calls and computation
 - **Flexible Embedding**: Use local models (llama.cpp) or [vectors.space](https://vectors.space) remote API
 
 ## Architecture
@@ -63,14 +65,16 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 
 - SQLite
 - [sqlite-vector](https://github.com/sqliteai/sqlite-vector) extension
+- [sqlite-sync](https://github.com/sqliteai/sqlite-sync) extension (optional, only needed for agent sync)
 - **For local embeddings**: A GGUF embedding model (e.g., [nomic-embed-text](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF))
 - **For remote embeddings**: A free API key from [vectors.space](https://vectors.space)
 
 ### Quick Start
 
 ```sql
--- Load extensions
+-- Load extensions (sync is optional)
 .load ./vector
+.load ./sync
 .load ./memory
 
 -- Configure embedding model (choose one):
@@ -79,6 +83,7 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 
 -- Option 2: Remote embedding via vectors.space (requires free API key from https://vectors.space)
+-- The provider name 'openai' selects the vectors.space OpenAI-compatible endpoint.
 -- SELECT memory_set_model('openai', 'text-embedding-3-small');
 -- SELECT memory_set_apikey('your-vectorspace-api-key');
 
@@ -91,7 +96,7 @@ SELECT memory_add_text('Vector databases store data as high-dimensional vectors,
 enabling similarity search. They are essential for semantic search, recommendation
 systems, and AI applications.', 'concepts');
 
--- Sync an entire documentation directory
+-- Add an entire documentation directory
 SELECT memory_add_directory('/path/to/docs', 'project-docs');
 
 -- Search your memory semantically
@@ -149,15 +154,21 @@ memories = recall("what's the project timeline")
 
 All `memory_add_*` functions use content-hash change detection to avoid redundant work:
 
-- **`memory_add_text`** — Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
-- **`memory_add_file`** — Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped.
-- **`memory_add_directory`** — Performs a full two-phase sync:
+- **`memory_add_text`**: Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
+- **`memory_add_file`**: Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped.
+- **`memory_add_directory`**: Performs a full two-phase sync:
   1. **Cleanup**: Removes database entries for files that no longer exist on disk
-  2. **Scan**: Recursively processes all matching files — adding new ones, replacing modified ones, and skipping unchanged ones
+  2. **Scan**: Recursively processes all matching files - adding new ones, replacing modified ones, and skipping unchanged ones
 
 Every sync operation is wrapped in a SQLite SAVEPOINT transaction. If anything fails mid-sync (embedding error, disk issue, etc.), the entire operation rolls back cleanly. There is no risk of partially-indexed files or orphaned entries.
 
-This makes all sync functions safe to call repeatedly — for example, on a cron schedule or at agent startup — with minimal overhead.
+This makes all sync functions safe to call repeatedly - for example, on a cron schedule or at agent startup - with minimal overhead.
+
+## AI Agents Offline Syncing
+
+Thanks to sqlite-sync, agents can share knowledge. Each markdown file added to the database is intelligently parsed and subdivided into chunks, and a [block-based LWW CRDT algorithm](https://github.com/sqliteai/sqlite-sync?tab=readme-ov-file#block-level-lww) keeps everything in sync. All memory, or just a specific memory context, can be kept in sync between agents.
+
+Memory syncing will be exposed in version 0.9.0.
 
 ## Use Cases
 
@@ -197,8 +208,7 @@ SELECT memory_cache_clear();                           -- Clear cached embedding
 
 ```sql
 -- View all memories
-SELECT hash, path, context,
-       datetime(created_at, 'unixepoch', 'localtime') as created
+SELECT hash, path, context, datetime(created_at, 'unixepoch', 'localtime') as created
 FROM dbmem_content;
 
 -- Delete by context
@@ -219,7 +229,7 @@ For complete API documentation, including all functions and configuration option
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/user/sqlite-memory.git
+git clone --recursive https://github.com/sqliteai/sqlite-memory.git
 cd sqlite-memory
 
 # Build (full build with local + remote engines)
@@ -259,17 +269,17 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Part of the SQLite AI Ecosystem
 
-This project is part of the **SQLite AI** ecosystem, a collection of extensions that bring modern AI capabilities to the world’s most widely deployed database. The goal is to make SQLite the default data and inference engine for Edge AI applications.
+This project is part of the **SQLite AI** ecosystem, a collection of extensions that bring modern AI capabilities to the world's most widely deployed database. The goal is to make SQLite the default data and inference engine for Edge AI applications.
 
 Other projects in the ecosystem include:
 
-- **[SQLite-AI](https://github.com/sqliteai/sqlite-ai)** — On-device inference and embedding generation directly inside SQLite.
-- **[SQLite-Memory](https://github.com/sqliteai/sqlite-memory)** — Markdown-based AI agent memory with semantic search.
-- **[SQLite-Vector](https://github.com/sqliteai/sqlite-vector)** — Ultra-efficient vector search for embeddings stored as BLOBs in standard SQLite tables.
-- **[SQLite-Sync](https://github.com/sqliteai/sqlite-sync)** — Local-first CRDT-based synchronization for seamless, conflict-free data sync and real-time collaboration across devices.
-- **[SQLite-Agent](https://github.com/sqliteai/sqlite-agent)** — Run autonomous AI agents directly from within SQLite databases.
-- **[SQLite-MCP](https://github.com/sqliteai/sqlite-mcp)** — Connect SQLite databases to MCP servers and invoke their tools.
-- **[SQLite-JS](https://github.com/sqliteai/sqlite-js)** — Create custom SQLite functions using JavaScript.
-- **[Liteparser](https://github.com/sqliteai/liteparser)** — A highly efficient and fully compliant SQLite SQL parser.
+- **[SQLite-AI](https://github.com/sqliteai/sqlite-ai)** - On-device inference and embedding generation directly inside SQLite.
+- **[SQLite-Memory](https://github.com/sqliteai/sqlite-memory)** - Markdown-based AI agent memory with semantic search.
+- **[SQLite-Vector](https://github.com/sqliteai/sqlite-vector)** - Ultra-efficient vector search for embeddings stored as BLOBs in standard SQLite tables.
+- **[SQLite-Sync](https://github.com/sqliteai/sqlite-sync)** - Local-first CRDT-based synchronization for seamless, conflict-free data sync and real-time collaboration across devices.
+- **[SQLite-Agent](https://github.com/sqliteai/sqlite-agent)** - Run autonomous AI agents directly from within SQLite databases.
+- **[SQLite-MCP](https://github.com/sqliteai/sqlite-mcp)** - Connect SQLite databases to MCP servers and invoke their tools.
+- **[SQLite-JS](https://github.com/sqliteai/sqlite-js)** - Create custom SQLite functions using JavaScript.
+- **[Liteparser](https://github.com/sqliteai/liteparser)** - A highly efficient and fully compliant SQLite SQL parser.
 
 Learn more at **[SQLite AI](https://sqlite.ai)**.

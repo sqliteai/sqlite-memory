@@ -13,6 +13,7 @@ A SQLite extension that provides semantic memory capabilities with hybrid search
   - [Memory Management Functions](#memory-management-functions)
   - [Deletion Functions](#deletion-functions)
 - [Virtual Table Module](#virtual-table-module)
+- [C API](#c-api)
 - [Configuration Options](#configuration-options)
 - [Timestamps](#timestamps)
 - [Examples](#examples)
@@ -407,28 +408,34 @@ A virtual table for performing hybrid semantic search.
 SELECT * FROM memory_search WHERE query = 'search text';
 ```
 
-**Columns:**
+**Hidden filter columns (used in WHERE):**
+| Column | Type | Required | Description |
+|--------|------|----------|-------------|
+| `query` | TEXT | Yes | The search query |
+| `max_entries` | INTEGER | No | Override `max_results` setting for this query only |
+| `context` | TEXT | No | Restrict results to a specific context label |
+
+**Output columns:**
 | Column | Type | Description |
 |--------|------|-------------|
-| `query` | TEXT (HIDDEN) | Search query (required in WHERE clause) |
 | `hash` | INTEGER | Content hash identifier |
-| `path` | TEXT | Source file path or generated UUID for text content |
-| `context` | TEXT | Context label (NULL if not set) |
-| `snippet` | TEXT | Text snippet from the matching chunk |
+| `seq` | INTEGER | Chunk sequence number within the document (0-based) |
 | `ranking` | REAL | Combined similarity score (0.0 - 1.0) |
+| `path` | TEXT | Source file path or generated UUID for text content |
+| `snippet` | TEXT | Text snippet from the matching chunk |
 
 **Notes:**
 - Requires sqlite-vector extension loaded first
 - Performs hybrid search combining vector similarity and FTS5
 - Results are ranked by combined score
-- Limited by `max_results` setting (default: 20)
+- Limited by `max_results` setting (default: 20), overridable per-query with `max_entries`
 - Filtered by `min_score` setting (default: 0.7)
 - Updates `last_accessed` timestamp if `update_access` is enabled
 
 **Example:**
 ```sql
 -- Basic search
-SELECT * FROM memory_search WHERE query = 'database indexing strategies';
+SELECT path, snippet, ranking FROM memory_search WHERE query = 'database indexing strategies';
 
 -- Search with ranking filter
 SELECT path, snippet, ranking
@@ -436,10 +443,129 @@ FROM memory_search
 WHERE query = 'how to optimize queries'
 AND ranking > 0.8;
 
--- Search within a specific context
-SELECT * FROM memory_search
+-- Restrict to a specific context
+SELECT path, snippet, ranking
+FROM memory_search
 WHERE query = 'meeting action items'
 AND context = 'meetings';
+
+-- Override result limit for this query only
+SELECT path, snippet, ranking
+FROM memory_search
+WHERE query = 'architecture overview'
+AND max_entries = 5;
+
+-- Get the chunk sequence number (useful for reconstructing document order)
+SELECT path, seq, snippet, ranking
+FROM memory_search
+WHERE query = 'installation steps';
+```
+
+---
+
+## C API
+
+In addition to the SQL interface, sqlite-memory exposes a C API for embedding custom providers directly from application code.
+
+### `sqlite3_memory_register_provider`
+
+```c
+int sqlite3_memory_register_provider(
+    sqlite3 *db,
+    const char *provider_name,
+    const dbmem_provider_t *provider
+);
+```
+
+Registers a custom embedding engine for a specific database connection. Once registered, calling `memory_set_model(provider_name, model)` from SQL will use your engine instead of the built-in local or remote engines.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `db` | `sqlite3 *` | The database connection to register the provider on |
+| `provider_name` | `const char *` | Name used to activate the provider via `memory_set_model()` |
+| `provider` | `const dbmem_provider_t *` | Pointer to a struct containing the engine callbacks |
+
+**Returns:** `SQLITE_OK` on success, or a SQLite error code.
+
+**`dbmem_provider_t` struct:**
+```c
+typedef struct {
+    // Called when memory_set_model(provider_name, model) is executed.
+    // api_key is the value set via memory_set_apikey() (may be NULL).
+    // xdata is the user pointer from this struct.
+    // Return an opaque engine pointer on success, or NULL on error (fill err_msg).
+    void *(*init)(const char *model, const char *api_key, void *xdata, char err_msg[1024]);
+
+    // Compute the embedding for the given text.
+    // Return 0 on success, non-zero on error.
+    int   (*compute)(void *engine, const char *text, int text_len, void *xdata, dbmem_embedding_result_t *result);
+
+    // Free the engine. Called on context teardown or when the model changes.
+    // May be NULL if no cleanup is needed.
+    void  (*free)(void *engine, void *xdata);
+
+    // Optional user-supplied pointer passed to all three callbacks.
+    void  *xdata;
+} dbmem_provider_t;
+```
+
+**`dbmem_embedding_result_t` struct:**
+```c
+typedef struct {
+    int    n_tokens;            // Number of tokens processed
+    int    n_tokens_truncated;  // Tokens that were truncated (0 if none)
+    int    n_embd;              // Embedding dimension
+    float *embedding;           // Embedding vector (engine-owned, valid until next call or free)
+} dbmem_embedding_result_t;
+```
+
+**Notes:**
+- Works regardless of `DBMEM_OMIT_LOCAL_ENGINE` / `DBMEM_OMIT_REMOTE_ENGINE` compile flags
+- The `embedding` buffer in `dbmem_embedding_result_t` must remain valid until the next `compute` call or `free` — it is engine-owned, not copied by the caller
+- Only one custom provider can be registered per connection at a time; registering again replaces the previous one
+- The provider struct is copied by value; the caller does not need to keep it alive after registration
+
+**Example:**
+```c
+#include "sqlite-memory.h"
+
+typedef struct { int dimension; } MyEngine;
+
+static void *my_init(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
+    MyEngine *e = malloc(sizeof(MyEngine));
+    e->dimension = 384;
+    return e;
+}
+
+static int my_compute(void *engine, const char *text, int text_len, void *xdata,
+                      dbmem_embedding_result_t *result) {
+    MyEngine *e = (MyEngine *)engine;
+    static float vec[384];
+    // ... fill vec with your embedding ...
+    result->n_embd = e->dimension;
+    result->n_tokens = text_len / 4;
+    result->n_tokens_truncated = 0;
+    result->embedding = vec;
+    return 0;
+}
+
+static void my_free(void *engine, void *xdata) {
+    free(engine);
+}
+
+// Register before using the database
+dbmem_provider_t provider = {
+    .init    = my_init,
+    .compute = my_compute,
+    .free    = my_free,
+    .xdata   = NULL,
+};
+sqlite3_memory_register_provider(db, "my-engine", &provider);
+
+// Then from SQL:
+// SELECT memory_set_model('my-engine', 'my-model-name');
+// SELECT memory_add_text('some text to embed');
 ```
 
 ---

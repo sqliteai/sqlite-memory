@@ -16,7 +16,7 @@ extern "C" {
 
 // Synchronous HTTP POST using NSURLSession.
 // Returns 0 on success, -1 on error.
-// On success: *out_data is malloc'd response body (caller frees), *out_size is its length, *out_http_code is the status.
+// On success: *out_data is sqlite3_malloc64'd response body (caller must sqlite3_free), *out_size is its length, *out_http_code is the status.
 // On error: err_msg is filled with a description.
 int dbmem_http_post(const char *url, const char *api_key, const char *body,
                     void **out_data, size_t *out_size, long *out_http_code,

@@ -369,8 +369,12 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     // build request
     if (encoding_needed) {
         int seek = snprintf(engine->request, engine->request_capacity, "{\"provider\": \"%s\", \"model\": \"%s\", \"input\": \"", engine->provider, engine->model);
-        size_t seek2 = text_encode_json(engine->request+seek, (engine->request_capacity - seek), text, text_len);
-        snprintf(engine->request+seek+seek2, (engine->request_capacity - seek - seek2), "\",\"strategy\": {\"type\": \"truncate\"}}");
+        if (seek < 0 || (size_t)seek >= engine->request_capacity) {
+            dbmem_context_set_error(engine->context, "Request buffer too small for provider/model header");
+            return -1;
+        }
+        size_t seek2 = text_encode_json(engine->request + seek, engine->request_capacity - (size_t)seek, text, text_len);
+        snprintf(engine->request + seek + seek2, engine->request_capacity - (size_t)seek - seek2, "\",\"strategy\": {\"type\": \"truncate\"}}");
     } else {
         snprintf(engine->request, engine->request_capacity,
                  "{"
@@ -414,7 +418,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
         size_t new_capacity = (response_size + 1) * 2;
         char *new_data = dbmemory_alloc(new_capacity);
         if (!new_data) {
-            free(response_data);
+            sqlite3_free(response_data);
             dbmem_context_set_error(engine->context, "Unable to allocate response buffer");
             return -1;
         }
@@ -425,7 +429,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     memcpy(engine->data, response_data, response_size);
     engine->data_size = response_size;
     engine->data[engine->data_size] = '\0';
-    free(response_data);
+    sqlite3_free(response_data);
 #endif
 
     if (http_code != 200) {
@@ -461,7 +465,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     int prompt_tokens = 0;
     int estimated_prompt_tokens = 0;
     int emb_start = -1;
-    int emb_count = 0;
+    size_t emb_count = 0;
 
     for (int i = 0; i < ntokens - 1; i++) {
         if (tokens[i].type != JSMN_STRING) continue;
@@ -469,7 +473,11 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
         const char *key = engine->data + tokens[i].start;
 
         if (klen == 9 && memcmp(key, "embedding", 9) == 0 && tokens[i + 1].type == JSMN_ARRAY) {
-            emb_count = tokens[i + 1].size;
+            if (tokens[i + 1].size <= 0) {
+                dbmem_context_set_error(engine->context, "Invalid embedding array size in API response");
+                return -1;
+            }
+            emb_count = (size_t)tokens[i + 1].size;
             emb_start = i + 2;
         } else if (klen == 16 && memcmp(key, "output_dimension", 16) == 0) {
             n_embd = atoi(engine->data + tokens[i + 1].start);
@@ -486,7 +494,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     }
 
     // allocate/grow embedding buffer
-    if (engine->embedding_capacity < (size_t)emb_count) {
+    if (engine->embedding_capacity < emb_count) {
         if (engine->embedding) dbmemory_free(engine->embedding);
         engine->embedding = (float *)dbmemory_alloc(sizeof(float) * emb_count);
         if (!engine->embedding) {
@@ -497,7 +505,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     }
 
     // parse embedding floats
-    for (int i = 0; i < emb_count; i++) {
+    for (size_t i = 0; i < emb_count; i++) {
         engine->embedding[i] = strtof(engine->data + tokens[emb_start + i].start, NULL);
     }
 

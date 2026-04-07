@@ -60,7 +60,7 @@ OUTPUT_NAME := memory
 ifeq ($(PLATFORM),macos)
     EXT := dylib
     FRAMEWORKS := -framework Security
-    LDFLAGS := -dynamiclib $(FRAMEWORKS)
+    LDFLAGS := -dynamiclib -undefined dynamic_lookup $(FRAMEWORKS)
     INCLUDES += -I/opt/homebrew/include -I/usr/local/include
     TEST_LDFLAGS := -L/opt/homebrew/lib -L/usr/local/lib -lsqlite3
     STRIP_CMD = strip -x -S $(TARGET)
@@ -196,7 +196,7 @@ ifeq ($(OMIT_LOCAL_ENGINE),0)
         else
             LLAMA_OPTIONS += '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64'
         endif
-        LDFLAGS := -dynamiclib -framework Metal -framework Foundation -framework Accelerate -framework Security
+        LDFLAGS := -dynamiclib -undefined dynamic_lookup -framework Metal -framework Foundation -framework Accelerate -framework Security
         ifeq ($(ARCH),x86_64)
             LDFLAGS += -arch x86_64
         else ifeq ($(ARCH),arm64)

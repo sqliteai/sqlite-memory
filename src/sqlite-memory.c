@@ -17,6 +17,7 @@
 #endif
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <time.h>
 
@@ -319,6 +320,7 @@ void dbmem_settings_load (sqlite3 *db, dbmem_context *ctx) {
         if (rc != SQLITE_ROW) break;
         
         const char *key = (const char *)sqlite3_column_text(vm, 0);
+        if (!key) continue;
         dbmem_settings_sync(ctx, key, sqlite3_column_value(vm, 1));
     }
     
@@ -442,6 +444,7 @@ static int dbmem_database_add_entry (dbmem_context *ctx, sqlite3 *db, uint64_t h
     rc = sqlite3_bind_text(vm, 2, path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
 
+    if (len > (int64_t)INT_MAX) { rc = SQLITE_TOOBIG; goto cleanup; }
     rc = (ctx->save_content) ? sqlite3_bind_text(vm, 3, buffer, (int)len, SQLITE_STATIC) : sqlite3_bind_null(vm, 3);
     if (rc != SQLITE_OK) goto cleanup;
 
@@ -539,7 +542,7 @@ static int dbmem_database_rollback_transaction (sqlite3 *db) {
 static void *dbmem_context_create (sqlite3 *db) {
     dbmem_context *ctx = (dbmem_context *)dbmemory_zeroalloc(sizeof(dbmem_context));
     if (!ctx) return NULL;
-    
+
     ctx->db = db;
     ctx->chars_per_tokens = DEFAULT_CHARS_PER_TOKEN;
     ctx->max_tokens = DEFAULT_MAX_TOKENS;
@@ -548,7 +551,7 @@ static void *dbmem_context_create (sqlite3 *db) {
     ctx->skip_html = true;
     ctx->save_content = true;
     ctx->engine_warmup = false;
-    
+
     ctx->perform_fts = fts5_is_available;
     ctx->max_results = DEFAULT_MAX_RESULTS;
     ctx->vector_weight = DEFAULT_VECTOR_WEIGHT;
@@ -626,12 +629,12 @@ bool dbmem_context_load_vector (dbmem_context *ctx) {
     // the workaround is to attempt to execute vector_version and check for an error
     // an error indicates that initialization has not been performed
     if (sqlite3_exec(ctx->db, "SELECT vector_version();", NULL, NULL, NULL) != SQLITE_OK) {
-        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", "SQLite-vector extension not found, make sure to load it before using the memory_search function");
+        dbmem_context_set_error(ctx, "SQLite-vector extension not found, make sure to load it before using the memory_search function");
         return false;
     }
-    
+
     if (ctx->dimension == 0) {
-        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", "SQLite-vector extension cannot be loaded because embedding dimension is not specified");
+        dbmem_context_set_error(ctx, "SQLite-vector extension cannot be loaded because embedding dimension is not specified");
         return false;
     }
     
@@ -640,7 +643,7 @@ bool dbmem_context_load_vector (dbmem_context *ctx) {
     snprintf(sql, sizeof(sql), "SELECT vector_init('dbmem_vault', 'embedding', 'type=FLOAT32,distance=COSINE,dimension=%d');", ctx->dimension);
     int rc = sqlite3_exec(ctx->db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
-        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", sqlite3_errmsg(ctx->db));
+        dbmem_context_set_error(ctx, sqlite3_errmsg(ctx->db));
         return false;
     }
     
@@ -648,23 +651,18 @@ bool dbmem_context_load_vector (dbmem_context *ctx) {
     return true;
 }
 
-bool dbmem_context_load_sync (dbmem_context *ctx) {
-    return false;
-#if 0
+bool dbmem_context_sync_available (dbmem_context *ctx) {
     if (ctx->sync_extension_available) return true;
     
     // there's no built-in way to verify if sqlite-sync has already been already loaded for this specific database connection
-    // the workaround is to attempt to execute vector_version and check for an error (an error indicates that initialization has not been performed)
+    // the workaround is to attempt to execute cloudsync_version and check for an error (an error indicates that initialization has not been performed)
     if (sqlite3_exec(ctx->db, "SELECT cloudsync_version();", NULL, NULL, NULL) != SQLITE_OK) {
         snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", "SQLite-sync extension not found, make sure to load it before using the memory_sync function");
         return false;
     }
-    
-    // SELECT cloudsync_init
-    
+
     ctx->sync_extension_available = true;
     return true;
-#endif
 }
 
 bool dbmem_context_perform_fts (dbmem_context *ctx) {
@@ -706,6 +704,13 @@ const char *dbmem_context_apikey (dbmem_context *ctx) {
 
 void dbmem_context_set_error (dbmem_context *ctx, const char *str) {
     snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "%s", str);
+}
+
+void dbmem_context_set_errorf (dbmem_context *ctx, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, fmt, ap);
+    va_end(ap);
 }
 
 // MARK: - Deletion -
@@ -1248,8 +1253,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
             rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
             if (rc != 0) return rc;
         #else
-            const char *err = "Local embedding cannot be computed because extension was compiled without local engine support";
-            memcpy(ctx->error_msg, err, strlen(err) + 1);
+            dbmem_context_set_error(ctx, "Local embedding cannot be computed because extension was compiled without local engine support");
             return 1;
         #endif
         }
@@ -1259,8 +1263,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
             rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
             if (rc != 0) return rc;
         #else
-            const char *err = "Remote embedding cannot be computed because extension was compiled without remote engine support";
-            memcpy(ctx->error_msg, err, strlen(err) + 1);
+            dbmem_context_set_error(ctx, "Remote embedding cannot be computed because extension was compiled without remote engine support");
             return 1;
         #endif
         }
@@ -1274,16 +1277,14 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
     // make sure dimension is the same
     if (ctx->dimension == 0) ctx->dimension = result.n_embd;
     else if (ctx->dimension != result.n_embd) {
-        const char *err = "Embedding dimension mismatch from the one stored in the database.";
-        memcpy(ctx->error_msg, err, strlen(err) + 1);
+        dbmem_context_set_error(ctx, "Embedding dimension mismatch from the one stored in the database.");
         return SQLITE_MISMATCH;
     }
-    
+
     // save embedding to database
     rc = dbmem_database_add_chunk(ctx, &result, offset, length, index);
     if (rc != 0) {
-        const char *err = sqlite3_errmsg(ctx->db);
-        memcpy(ctx->error_msg, err, strlen(err) + 1);
+        dbmem_context_set_error(ctx, sqlite3_errmsg(ctx->db));
         goto cleanup;
     }
     DEBUG_EMBEDDING(&result);
@@ -1292,8 +1293,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
     if (!fts5_is_available) goto cleanup;
     rc = dbmem_database_add_fts5(ctx, text, len, index);
     if (rc != 0) {
-        const char *err = sqlite3_errmsg(ctx->db);
-        memcpy(ctx->error_msg, err, strlen(err) + 1);
+        dbmem_context_set_error(ctx, sqlite3_errmsg(ctx->db));
         goto cleanup;
     }
     
@@ -1343,18 +1343,18 @@ cleanup:
 
 static int dbmem_process_file (dbmem_context *ctx, const char *path) {
     if (!dbmem_file_exists(path)) {
-        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to find file at path %s", path);
+        dbmem_context_set_errorf(ctx, "Unable to find file at path %s", path);
         return -1;
     }
-    
+
     // check if the file needs to be skipped based on its extension
-    char *extensions = (ctx->extensions) ? ctx->extensions : "md,mdx";
+    const char *extensions = (ctx->extensions) ? ctx->extensions : "md,mdx";
     if (extensions && !dbmem_file_has_extension(path, extensions)) return 0;
-    
+
     int64_t len = 0;
     char *buffer = dbmem_file_read(path, &len);
     if (!buffer) {
-        snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to read file at path %s", path);
+        dbmem_context_set_errorf(ctx, "Unable to read file at path %s", path);
         return -1;
     }
     
@@ -1579,76 +1579,79 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     SQLITE_EXTENSION_INIT2(pApi);
     #endif
     int rc = SQLITE_OK;
-    
+
     rc = dbmem_database_init(db);
     if (rc != SQLITE_OK) {
         if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("An error occurred while creating internal tables (%s)", sqlite3_errmsg(db));
         return rc;
     }
-    
+
     void *ctx = dbmem_context_create(db);
     if (!ctx) {
         if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("Not enough memory to create a database context");
         return SQLITE_NOMEM;
     }
-    
-    dbmem_settings_load(db, (dbmem_context *)ctx);
-    
-    rc = sqlite3_create_function_v2(db, "memory_version", 0, SQLITE_UTF8, ctx, dbmem_version, NULL, NULL, dbmem_context_free);
-    if (rc != SQLITE_OK) return rc;
 
+    dbmem_settings_load(db, (dbmem_context *)ctx);
+
+    // Register all functions without destructor first; memory_version is registered last
+    // so that ctx ownership only transfers to SQLite once all registrations succeed.
     rc = sqlite3_create_function_v2(db, "_memory_ctx_ptr", 0, SQLITE_UTF8, ctx, dbmem_ctx_ptr, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
     
     rc = sqlite3_create_function_v2(db, "memory_set_option", 2, SQLITE_UTF8, ctx, dbmem_set_option, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
     rc = sqlite3_create_function_v2(db, "memory_get_option", 1, SQLITE_UTF8, ctx, dbmem_get_option, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
     rc = sqlite3_create_function_v2(db, "memory_set_model", 2, SQLITE_UTF8, ctx, dbmem_set_model, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
     rc = sqlite3_create_function_v2(db, "memory_set_apikey", 1, SQLITE_UTF8, ctx, dbmem_set_apikey, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
     #ifndef DBMEM_OMIT_IO
     rc = sqlite3_create_function_v2(db, "memory_add_file", 1, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_add_file", 2, SQLITE_UTF8, ctx, dbmem_add_file, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_add_directory", 1, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_add_directory", 2, SQLITE_UTF8, ctx, dbmem_add_directory, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
     #endif
-    
+
     rc = sqlite3_create_function_v2(db, "memory_add_text", 1, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_add_text", 2, SQLITE_UTF8, ctx, dbmem_add_text, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_delete", 1, SQLITE_UTF8, ctx, dbmem_delete, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_delete_context", 1, SQLITE_UTF8, ctx, dbmem_delete_context, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_clear", 0, SQLITE_UTF8, ctx, dbmem_clear, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_cache_clear", 0, SQLITE_UTF8, ctx, dbmem_cache_clear, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_cache_clear", 2, SQLITE_UTF8, ctx, dbmem_cache_clear, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = dbmem_register_search(db, ctx, pzErrMsg);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    // Register last: this transfers ctx ownership to SQLite (destructor fires on connection close).
+    rc = sqlite3_create_function_v2(db, "memory_version", 0, SQLITE_UTF8, ctx, dbmem_version, NULL, NULL, dbmem_context_free);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     return SQLITE_OK;
 }
