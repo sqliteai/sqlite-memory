@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <float.h>
+#include <limits.h>
 #include <time.h>
 
 #ifndef SQLITE_CORE
@@ -87,7 +88,7 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     // merge: vectorScore, textScore, hash, seq, hasVector, hasFts = 6 arrays * 2*entries (can have both sources)
     // final: rank, hash, seq = 3 arrays * entries
 
-    int merge_entries = entries * 2;
+    size_t merge_entries = (size_t)entries * 2;
     size_t size = 0;
 
     // fts arrays
@@ -586,7 +587,13 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     
     // compute fetch count (oversampling)
     int oversample = dbmem_context_search_oversample(ctx);
-    int fetch_count = (oversample > 0) ? max_results * oversample : max_results;
+    int fetch_count;
+    if (oversample > 0) {
+        if (max_results > INT_MAX / oversample) return SQLITE_TOOBIG;
+        fetch_count = max_results * oversample;
+    } else {
+        fetch_count = max_results;
+    }
 
     // allocate internal cursor buffer
     int rc = vMemorySearchCursorAllocate(c, fetch_count, perform_fts);
