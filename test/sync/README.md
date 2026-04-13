@@ -59,9 +59,26 @@ The sync layer routes changes through a [SQLiteCloud](https://sqlitecloud.io/) m
 
 1. **Create an account** at [https://sqlite.ai/](https://sqlite.ai/) and create a project.
 2. **Create a database** in the [dashboard](https://dashboard.sqlitecloud.io/).
-3. **Enable OffSync** for the database: open the database, click **OffSync**, and enable synchronization. This provisions the CloudSync microservice that routes changes between agents.
-4. **Copy the managed database ID** — shown on the OffSync page (format: `db_xxxxxxxxxxxx`).
-5. **Create API keys** — one per agent is recommended, so access can be revoked independently. API keys are created in the dashboard under **API Keys**.
+3. **Create the memory table** — connect to your database and run:
+   ```sql
+   CREATE TABLE IF NOT EXISTS dbmem_content (
+       hash          INTEGER PRIMARY KEY NOT NULL,
+       path          TEXT    NOT NULL DEFAULT '' UNIQUE,
+       value         TEXT    DEFAULT NULL,
+       length        INTEGER NOT NULL DEFAULT 0,
+       context       TEXT    DEFAULT NULL,
+       created_at    INTEGER DEFAULT 0,
+       last_accessed INTEGER DEFAULT 0
+   );
+   ```
+4. **Enable OffSync** for the database: open the database, click **OffSync**, and enable synchronization. This provisions the CloudSync microservice that routes changes between agents.
+5. **Enable OffSync for the table** — initialize sync on `dbmem_content` and configure the `value` column to use block-level LWW so that concurrent agent edits to different lines of the same entry are preserved rather than overwritten. This can be done from the dashboard UI (Database → OffSync section) or via SQL:
+   ```sql
+   SELECT cloudsync_init('dbmem_content', 'cls', 1);
+   SELECT cloudsync_set_column('dbmem_content', 'value', 'algo', 'block');
+   ```
+6. **Copy the managed database ID** — shown on the OffSync page (format: `db_xxxxxxxxxxxx`).
+7. **Create API keys** — one per agent is recommended, so access can be revoked independently. API keys are created in the dashboard under **API Keys**.
 
 ### Credentials used by the test
 
