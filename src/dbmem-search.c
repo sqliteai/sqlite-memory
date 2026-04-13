@@ -382,7 +382,8 @@ static int dbmem_semantic_search (sqlite3 *db, vMemorySearchCursor *c, float *em
     static const char *sql_with_context =
         "SELECT v.distance, e.hash, e.seq FROM dbmem_vault AS e "
         "JOIN vector_full_scan('dbmem_vault', 'embedding', ?1, ?2) AS v ON e.rowid = v.rowid "
-        "WHERE INSTR(',' || ?3 || ',', ',' || e.context || ',') > 0";
+        "JOIN dbmem_content AS c ON e.hash = c.hash "
+        "WHERE INSTR(',' || ?3 || ',', ',' || c.context || ',') > 0";
     const char *sql = (context) ? sql_with_context : sql_no_context;
     
     sqlite3_stmt *vm = NULL;
@@ -452,32 +453,44 @@ static int vMemorySearchDisconnect (sqlite3_vtab *pVtab) {
     return SQLITE_OK;
 }
 
+// idxNum bitmask for vMemorySearchCursorFilter to decode argv positions:
+#define SEARCH_IDX_QUERY    0x01  // argv[0] = query text
+#define SEARCH_IDX_MAXITEMS 0x02  // next argv = max_results
+#define SEARCH_IDX_CONTEXT  0x04  // next argv = context name
+
 static int vMemorySearchBestIndex (sqlite3_vtab *tab, sqlite3_index_info *pIdxInfo) {
     UNUSED_PARAM(tab);
     pIdxInfo->estimatedCost = (double)1;
     pIdxInfo->estimatedRows = 100;
     pIdxInfo->orderByConsumed = 1;
-    pIdxInfo->idxNum = 1;
-    
+
+    // Assign consecutive argvIndex values (no gaps) and record which columns are
+    // present in idxNum so xFilter can decode argv without ambiguity.
+    int idxNum = 0;
+    int argvIndex = 1;
     const struct sqlite3_index_constraint *pConstraint = pIdxInfo->aConstraint;
-    for(int i=0; i<pIdxInfo->nConstraint; i++, pConstraint++){
-        if( pConstraint->usable == 0 ) continue;
-        if( pConstraint->op != SQLITE_INDEX_CONSTRAINT_EQ ) continue;
-        switch( pConstraint->iColumn ){
+    for (int i = 0; i < pIdxInfo->nConstraint; i++, pConstraint++) {
+        if (pConstraint->usable == 0) continue;
+        if (pConstraint->op != SQLITE_INDEX_CONSTRAINT_EQ) continue;
+        switch (pConstraint->iColumn) {
             case SEARCH_COLUMN_QUERY:
-                pIdxInfo->aConstraintUsage[i].argvIndex = 1;
+                pIdxInfo->aConstraintUsage[i].argvIndex = argvIndex++;
                 pIdxInfo->aConstraintUsage[i].omit = 1;
+                idxNum |= SEARCH_IDX_QUERY;
                 break;
             case SEARCH_COLUMN_MAXITEMS:
-                pIdxInfo->aConstraintUsage[i].argvIndex = 2;
+                pIdxInfo->aConstraintUsage[i].argvIndex = argvIndex++;
                 pIdxInfo->aConstraintUsage[i].omit = 1;
+                idxNum |= SEARCH_IDX_MAXITEMS;
                 break;
             case SEARCH_COLUMN_CONTEXT:
-                pIdxInfo->aConstraintUsage[i].argvIndex = 3;
+                pIdxInfo->aConstraintUsage[i].argvIndex = argvIndex++;
                 pIdxInfo->aConstraintUsage[i].omit = 1;
+                idxNum |= SEARCH_IDX_CONTEXT;
                 break;
         }
     }
+    pIdxInfo->idxNum = idxNum;
     return SQLITE_OK;
 }
 
@@ -559,31 +572,35 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     dbmem_context *ctx = searchTab->ctx;
     sqlite3 *db = searchTab->db;
     
-    // check and retrieve arguments
+    // Decode arguments using the idxNum bitmask set by xBestIndex.
+    // argvIndex values are consecutive so argv positions are derived from the bitmask.
     int  max_results = dbmem_context_max_results(ctx);
     bool perform_fts = dbmem_context_perform_fts(ctx);
     const char *query = NULL;
     const char *context = NULL;
-    
-    if (argc <= 0) {
+
+    if (!(idxNum & SEARCH_IDX_QUERY) || argc <= 0) {
         sqlvTab->zErrMsg = sqlite3_mprintf("The memory_search function expects at least one query argument of type TEXT");
         return SQLITE_ERROR;
     }
-    
-    if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlvTab->zErrMsg = sqlite3_mprintf("The first query argument of memory_search must be of type TEXT");
-        return SQLITE_ERROR;
-    }
-    query = (const char *)sqlite3_value_text(argv[0]);
-    
-    if (argc > 1) {
-        // only the next two arguments are handled
-        for (int i=1; i<argc && i<=2; ++i) {
-            if (sqlite3_value_type(argv[i]) == SQLITE_INTEGER) max_results = sqlite3_value_int(argv[i]);
-            else if (sqlite3_value_type(argv[i]) == SQLITE_TEXT) context = (const char *)sqlite3_value_text(argv[i]);
-            // ignore any other type
+
+    int argPos = 0;
+    if (idxNum & SEARCH_IDX_QUERY) {
+        if (sqlite3_value_type(argv[argPos]) != SQLITE_TEXT) {
+            sqlvTab->zErrMsg = sqlite3_mprintf("The first query argument of memory_search must be of type TEXT");
+            return SQLITE_ERROR;
         }
+        query = (const char *)sqlite3_value_text(argv[argPos++]);
     }
+    if (idxNum & SEARCH_IDX_MAXITEMS) {
+        if (sqlite3_value_type(argv[argPos]) == SQLITE_INTEGER) max_results = sqlite3_value_int(argv[argPos]);
+        argPos++;
+    }
+    if (idxNum & SEARCH_IDX_CONTEXT) {
+        if (sqlite3_value_type(argv[argPos]) == SQLITE_TEXT) context = (const char *)sqlite3_value_text(argv[argPos]);
+        argPos++;
+    }
+    (void)argPos; (void)argc; (void)idxStr;
     
     // compute fetch count (oversampling)
     int oversample = dbmem_context_search_oversample(ctx);

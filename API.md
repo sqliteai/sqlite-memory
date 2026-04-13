@@ -12,6 +12,7 @@ A SQLite extension that provides semantic memory capabilities with hybrid search
   - [Configuration Functions](#configuration-functions)
   - [Memory Management Functions](#memory-management-functions)
   - [Deletion Functions](#deletion-functions)
+  - [Sync Functions](#sync-functions)
 - [Virtual Table Module](#virtual-table-module)
 - [C API](#c-api)
 - [Configuration Options](#configuration-options)
@@ -395,6 +396,56 @@ SELECT memory_cache_clear();
 
 -- Clear cache for a specific provider/model
 SELECT memory_cache_clear('openai', 'text-embedding-3-small');
+```
+
+---
+
+### Sync Functions
+
+Require [sqlite-sync](https://github.com/sqliteai/sqlite-sync) to be loaded before use.
+
+#### `memory_enable_sync([context TEXT, ...])`
+
+Enables CRDT-based synchronization for `dbmem_content` via sqlite-sync. Uses the CLS algorithm with block-level LWW on the `value` column for fine-grained conflict resolution.
+
+**Parameters:** Zero or more TEXT context names. If no arguments are given, all memory is synced. If one or more context names are provided, only rows matching those contexts are synced.
+
+**Returns:** INTEGER - 1 on success
+
+**Notes:**
+- Requires sqlite-sync to be loaded; returns an error otherwise
+- Idempotent: safe to call multiple times — each call is a full reconfiguration
+- With no arguments, any previously-set context filter is cleared (sync all)
+- With arguments, sets a row-level filter: only the specified contexts are replicated
+- Block-level LWW on `value` enables line-level conflict resolution for text content
+- All other columns use the default CLS algorithm
+
+**Example:**
+```sql
+-- Sync all memory
+SELECT memory_enable_sync();
+
+-- Sync only specific contexts
+SELECT memory_enable_sync('conversation', 'project-docs');
+```
+
+---
+
+#### `memory_disable_sync()`
+
+Removes synchronization infrastructure from `dbmem_content`, disabling all replication. The table data is preserved.
+
+**Parameters:** None
+
+**Returns:** INTEGER - 1 on success
+
+**Notes:**
+- Requires sqlite-sync to be loaded; returns an error otherwise
+- Safe to call even if sync was never enabled
+
+**Example:**
+```sql
+SELECT memory_disable_sync();
 ```
 
 ---

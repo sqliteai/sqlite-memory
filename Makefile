@@ -472,6 +472,30 @@ e2e: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/e2e $(VECTOR_LIB)
 	@VECTOR_LIB=$(CURDIR)/$(VECTOR_LIB) $(BUILD_DIR)/e2e
 	@echo "E2E tests passed!"
 
+SYNC_LIB := $(TEST_DIR)/sync/cloudsync.$(EXT)
+
+$(BUILD_DIR)/test_sync.o: $(TEST_DIR)/sync/test_sync.c | $(BUILD_DIR)
+	@echo "Compiling test_sync.c..."
+	@$(CC) $(CFLAGS) $(TEST_DEFINES) $(DEFINES) $(INCLUDES) -c $< -o $@
+
+$(BUILD_DIR)/test_sync: $(BUILD_DIR)/test_sync.o $(TEST_C_OBJECTS) $(TEST_OBJC_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) $(CURL_DEPS) | $(BUILD_DIR)
+	@echo "Linking test_sync..."
+	@$(LINKER) $(BUILD_DIR)/test_sync.o $(TEST_C_OBJECTS) $(TEST_OBJC_OBJECTS) $(TEST_SQLITE_OBJ) $(LLAMA_LIBS) \
+		$(TEST_LDFLAGS) $(FRAMEWORKS) $(TEST_LINK_EXTRAS) \
+		-o $@
+
+.PHONY: sync-test
+sync-test: $(BUILD_DEPS) $(TARGET) $(BUILD_DIR)/test_sync $(VECTOR_LIB)
+	@echo "Running sync integration test..."
+	@APIKEY=$${APIKEY} \
+	 VECTOR_LIB=$(CURDIR)/$(VECTOR_LIB) \
+	 SYNC_LIB=$(CURDIR)/$(SYNC_LIB) \
+	 SYNC_DB_ID=$${SYNC_DB_ID:-db_hqjmctyiplop4qn34lt7y74nli} \
+	 SYNC_APIKEY_A=$${SYNC_APIKEY_A:-rsn7t70bV4KccIlqBZqU0QGfYaN11v9v6LBAOoGYGv8} \
+	 SYNC_APIKEY_B=$${SYNC_APIKEY_B:-GB02PvlrhGAENj0xKHF5KAwHW4BKhSQPvxApS5g8NVM} \
+	 $(BUILD_DIR)/test_sync
+	@echo "Sync test passed!"
+
 .PHONY: remote
 remote:
 	@$(MAKE) OMIT_LOCAL_ENGINE=1 extension

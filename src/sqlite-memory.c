@@ -106,6 +106,8 @@ struct dbmem_context {
     
     bool        vector_extension_available;     // SQLite-vector available and correctly loaded flag
     bool        sync_extension_available;       // SQLite-sync available and correctly loadedflag
+    bool        sync_enabled;                   // True when memory_enable_sync has been successfully called
+    bool        reindex_mode;                   // When true, process_buffer skips hash check and content insert (for post-sync reindex)
     bool        dimension_saved;                // Embedding dimension needs to be automatically serialized
 
     // Settings
@@ -336,7 +338,7 @@ static int dbmem_database_init (sqlite3 *db) {
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash INTEGER PRIMARY KEY NOT NULL, path TEXT NOT NULL UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash INTEGER PRIMARY KEY NOT NULL, path TEXT NOT NULL DEFAULT '' UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL DEFAULT 0, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
@@ -1302,13 +1304,16 @@ cleanup:
 }
 
 static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t len) {
-    // check if buffer was already processed
-    uint64_t hash = dbmem_hash_compute (buffer, (size_t)len);
-    if (dbmem_database_check_if_stored(ctx->db, hash, len)) return SQLITE_OK;
-    
+    uint64_t hash = dbmem_hash_compute(buffer, (size_t)len);
+
+    // In normal mode: skip if already indexed
+    if (!ctx->reindex_mode) {
+        if (dbmem_database_check_if_stored(ctx->db, hash, len)) return SQLITE_OK;
+    }
+
     // set up parse settings
     dbmem_parse_settings settings = {0};
-    
+
     ctx->hash = hash;
     settings.xdata = (void *)ctx;
     settings.callback = dbmem_process_callback;
@@ -1317,17 +1322,18 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
     settings.overlay_tokens = ctx->overlay_tokens;
     settings.skip_semantic = ctx->skip_semantic;
     settings.skip_html = ctx->skip_html;
-    
+
     sqlite3 *db = ctx->db;
     int rc = dbmem_database_begin_transaction(db);
     if (rc != SQLITE_OK) goto cleanup;
 
-    // delete old entry if this path was previously indexed with different content
-    dbmem_database_delete_stale_path(db, ctx->path, hash);
+    if (!ctx->reindex_mode) {
+        // delete old entry if this path was previously indexed with different content
+        dbmem_database_delete_stale_path(db, ctx->path, hash);
+        rc = dbmem_database_add_entry(ctx, db, hash, buffer, len);
+        if (rc != SQLITE_OK) goto cleanup;
+    }
 
-    rc = dbmem_database_add_entry(ctx, db, hash, buffer, len);
-    if (rc != SQLITE_OK) goto cleanup;
-    
     rc = dbmem_parse(buffer, (size_t)len, &settings);
     
     if (rc == SQLITE_OK && !ctx->dimension_saved) {
@@ -1532,7 +1538,184 @@ static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_val
     (rc == 0) ? sqlite3_result_int64(context, ctx->counter) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
 #endif
-    
+
+// MARK: - Reindex
+
+static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc); UNUSED_PARAM(argv);
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3 *db = ctx->db;
+
+    if (!ctx->model) {
+        sqlite3_result_error(context, "memory_reindex: no embedding model configured", -1);
+        return;
+    }
+
+    // Process one row at a time: finalize read cursor before each write to avoid conflicts
+    static const char *find_sql =
+        "SELECT path, value, context FROM dbmem_content "
+        "WHERE value IS NOT NULL AND hash NOT IN (SELECT DISTINCT hash FROM dbmem_vault) "
+        "LIMIT 1;";
+
+    ctx->reindex_mode = true;
+    dbmem_context_reset_temp_values(ctx);
+
+    int64_t processed = 0;
+    int rc = SQLITE_OK;
+
+    while (1) {
+        sqlite3_stmt *vm = NULL;
+        rc = sqlite3_prepare_v2(db, find_sql, -1, &vm, NULL);
+        if (rc != SQLITE_OK) break;
+
+        int step = sqlite3_step(vm);
+        if (step != SQLITE_ROW) { sqlite3_finalize(vm); break; }
+
+        // Copy row data before finalizing so we can write in the next step
+        const char *path_raw = (const char *)sqlite3_column_text(vm, 0);
+        const char *value_raw = (const char *)sqlite3_column_text(vm, 1);
+        int64_t value_len = (int64_t)sqlite3_column_bytes(vm, 1);
+        const char *ctx_raw = (const char *)sqlite3_column_text(vm, 2);
+
+        char *path = dbmem_strdup(path_raw);
+        char *value = (char *)sqlite3_malloc64((sqlite3_uint64)(value_len + 1));
+        if (value) { memcpy(value, value_raw, (size_t)value_len); value[value_len] = '\0'; }
+        char *ctx_name = dbmem_strdup(ctx_raw);
+
+        sqlite3_finalize(vm);
+
+        if (!value) {
+            dbmemory_free(path);
+            dbmemory_free(ctx_name);
+            rc = SQLITE_NOMEM;
+            break;
+        }
+
+        ctx->path = path;
+        ctx->context = ctx_name;
+        rc = dbmem_process_buffer(ctx, value, value_len);
+
+        // After CRDT sync the stored hash (PK) may differ from the hash computed
+        // from the current value bytes. If so, update dbmem_content.hash so that:
+        // (1) this row is excluded from future reindex loop iterations, and
+        // (2) vector search JOINs on vault.hash = content.hash find the entry.
+        if (rc == SQLITE_OK && path) {
+            static const char *fix_sql =
+                "UPDATE dbmem_content SET hash = ?1 WHERE path = ?2 AND hash != ?1;";
+            sqlite3_stmt *fix_vm = NULL;
+            if (sqlite3_prepare_v2(db, fix_sql, -1, &fix_vm, NULL) == SQLITE_OK) {
+                sqlite3_bind_int64(fix_vm, 1, (sqlite3_int64)ctx->hash);
+                sqlite3_bind_text(fix_vm, 2, path, -1, SQLITE_STATIC);
+                sqlite3_step(fix_vm);
+                sqlite3_finalize(fix_vm);
+            }
+        }
+
+        dbmemory_free(path);
+        dbmemory_free(value);
+        dbmemory_free(ctx_name);
+
+        if (rc != SQLITE_OK) break;
+        processed++;
+    }
+
+    ctx->reindex_mode = false;
+    ctx->path = NULL;
+    ctx->context = NULL;
+
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    sqlite3_result_int64(context, processed);
+}
+
+// MARK: - Sync
+
+static void dbmem_enable_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+
+    if (!dbmem_context_sync_available(ctx)) {
+        sqlite3_result_error(context, "SQLite-sync must be loaded to enable memory syncing", -1);
+        return;
+    }
+
+    for (int i = 0; i < argc; i++) {
+        if (sqlite3_value_type(argv[i]) != SQLITE_TEXT) {
+            sqlite3_result_error(context, "memory_enable_sync: all arguments must be TEXT (context names)", -1);
+            return;
+        }
+    }
+
+    int rc = sqlite3_exec(db, "SELECT cloudsync_init('dbmem_content', 'cls', 3);", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    rc = sqlite3_exec(db, "SELECT cloudsync_set_column('dbmem_content', 'value', 'algo', 'block');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    if (argc == 0) {
+        // No context filter: clear any previously-set filter so all memory is synced
+        rc = sqlite3_exec(db, "SELECT cloudsync_clear_filter('dbmem_content');", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            return;
+        }
+    } else {
+        // Build: context IN ('ctx1','ctx2',...)
+        char *filter = sqlite3_mprintf("context IN (");
+        if (!filter) { sqlite3_result_error_nomem(context); return; }
+        for (int i = 0; i < argc; i++) {
+            const char *cname = (const char *)sqlite3_value_text(argv[i]);
+            char *new_filter = (i < argc - 1)
+                ? sqlite3_mprintf("%z'%q',", filter, cname)
+                : sqlite3_mprintf("%z'%q')", filter, cname);
+            filter = new_filter;
+            if (!filter) { sqlite3_result_error_nomem(context); return; }
+        }
+        // Use %q to escape the filter string as a SQL literal passed to cloudsync_set_filter
+        char *sql = sqlite3_mprintf("SELECT cloudsync_set_filter('dbmem_content', '%q');", filter);
+        sqlite3_free(filter);
+        if (!sql) { sqlite3_result_error_nomem(context); return; }
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) {
+            sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+            return;
+        }
+    }
+
+    ctx->sync_enabled = true;
+    sqlite3_result_int(context, 1);
+}
+
+static void dbmem_disable_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc); UNUSED_PARAM(argv);
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+
+    if (!dbmem_context_sync_available(ctx)) {
+        sqlite3_result_error(context, "SQLite-sync must be loaded to disable memory syncing", -1);
+        return;
+    }
+
+    int rc = sqlite3_exec(db, "SELECT cloudsync_cleanup('dbmem_content');", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    ctx->sync_enabled = false;
+    sqlite3_result_int(context, 1);
+}
+
 // MARK: -
 
 #define DBMEM_CTX_POINTER_TYPE "dbmem_context_ptr"
@@ -1644,6 +1827,15 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_cache_clear", 2, SQLITE_UTF8, ctx, dbmem_cache_clear, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    rc = sqlite3_create_function_v2(db, "memory_reindex", 0, SQLITE_UTF8, ctx, dbmem_sql_reindex, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    rc = sqlite3_create_function_v2(db, "memory_enable_sync", -1, SQLITE_UTF8, ctx, dbmem_enable_sync, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    rc = sqlite3_create_function_v2(db, "memory_disable_sync", 0, SQLITE_UTF8, ctx, dbmem_disable_sync, NULL, NULL, NULL);
     if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = dbmem_register_search(db, ctx, pzErrMsg);

@@ -164,11 +164,55 @@ Every sync operation is wrapped in a SQLite SAVEPOINT transaction. If anything f
 
 This makes all sync functions safe to call repeatedly - for example, on a cron schedule or at agent startup - with minimal overhead.
 
-## AI Agents Offline Syncing
+## Agent Memory Sync
 
-Thanks to sqlite-sync, agents can share knowledge. Each markdown file added to the database is intelligently parsed and subdivided into chunks, and a [block-based LWW CRDT algorithm](https://github.com/sqliteai/sqlite-sync?tab=readme-ov-file#block-level-lww) keeps everything in sync. All memory, or just a specific memory context, can be kept in sync between agents.
+Multiple agents can share and merge knowledge without any coordination. Each agent works independently with its own local SQLite database, syncing through a shared [SQLiteCloud](https://sqlitecloud.io/) managed database when connectivity is available.
 
-Memory syncing will be exposed in version 0.9.0.
+Enable sync on a database connection before ingesting content:
+
+```sql
+-- Load the sqlite-sync extension
+SELECT load_extension('./cloudsync');
+
+-- Enable CRDT sync (optionally scoped to a specific context)
+SELECT memory_enable_sync();               -- sync all memory
+SELECT memory_enable_sync('project-x');   -- sync only the 'project-x' context
+
+-- Connect to the shared cloud database
+SELECT cloudsync_network_init('your-managed-database-id');
+SELECT cloudsync_network_set_apikey('your-api-key');
+
+-- Ingest content normally — CRDT tracks every write
+SELECT memory_add_text('Agent A findings...', 'research');
+
+-- Push local changes and pull remote ones (call twice for full bidirectional exchange)
+SELECT cloudsync_network_sync(500, 3);
+SELECT cloudsync_network_sync(500, 3);
+
+-- Generate embeddings for any content received from other agents
+SELECT memory_reindex();
+```
+
+Each piece of text added to the database is parsed into chunks and tracked by a [block-level LWW CRDT algorithm](https://github.com/sqliteai/sqlite-sync?tab=readme-ov-file#block-level-lww), which merges line-level changes from concurrent agents without conflicts. Only the `dbmem_content` table is synced — embeddings are always generated locally after receiving new content.
+
+### Why This Matters for AI Systems
+
+The combination of local-first memory and CRDT sync enables agent architectures that are not possible with centralized databases:
+
+- **No single point of failure** — each agent has a complete, queryable copy of shared memory
+- **Offline-capable** — agents ingest and search without network access; sync catches up when connectivity returns
+- **Selective sharing** — `memory_enable_sync('context')` limits sync to a named context, so agents can keep private memory separate from shared memory
+- **Scales to many agents** — agents running on different nodes accumulate knowledge in parallel and merge into a single consistent corpus without coordination
+
+### Working Example
+
+[`test/sync/`](test/sync/) contains a full integration test that walks through the entire flow:
+
+- Agent A indexes knowledge about the James Webb Space Telescope
+- Agent B indexes knowledge about the Great Barrier Reef
+- After sync, **both agents can answer questions about both topics** — knowledge each agent never directly indexed
+
+See [`test/sync/README.md`](test/sync/README.md) for setup instructions, SQLiteCloud account configuration, and how to run the test.
 
 ## Use Cases
 
