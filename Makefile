@@ -62,7 +62,7 @@ ifeq ($(PLATFORM),macos)
     FRAMEWORKS := -framework Security
     LDFLAGS := -dynamiclib -undefined dynamic_lookup $(FRAMEWORKS)
     INCLUDES += -I/opt/homebrew/include -I/usr/local/include
-    TEST_LDFLAGS := -L/opt/homebrew/lib -L/usr/local/lib -lsqlite3
+    TEST_LDFLAGS := -L/opt/homebrew/lib -L/usr/local/lib
     STRIP_CMD = strip -x -S $(TARGET)
 
     CURL_SSL_LIBS := -framework CoreFoundation
@@ -86,7 +86,7 @@ else ifeq ($(PLATFORM),linux)
     CC := gcc
     CXX := g++
     LDFLAGS := -shared -lpthread -lm -ldl
-    TEST_LDFLAGS := -lsqlite3 -lpthread -lm -ldl
+    TEST_LDFLAGS := -lpthread -lm -ldl
     STRIP_CMD = strip --strip-unneeded $(TARGET)
     CURL_CONFIG := --with-openssl
     CURL_SSL_LIBS := -lssl -lcrypto
@@ -97,7 +97,7 @@ else ifeq ($(PLATFORM),windows)
     CXX := g++
     LDFLAGS := -shared -static-libgcc -lbcrypt
     OUTPUT_NAME := memory
-    TEST_LDFLAGS := -lsqlite3 -lbcrypt
+    TEST_LDFLAGS := -lbcrypt
     STRIP_CMD = strip --strip-unneeded $(TARGET)
     CURL_CONFIG := --with-schannel CFLAGS="-DCURL_STATICLIB"
     CURL_SSL_LIBS := -lcrypt32 -lsecur32 -lws2_32
@@ -395,12 +395,9 @@ ifeq ($(OMIT_REMOTE_ENGINE),0)
     endif
 endif
 
-# Android: compile SQLite amalgamation into unittest (set SQLITE_AMALGAM=path/to/sqlite3.c)
-SQLITE_AMALGAM ?=
-TEST_SQLITE_OBJ :=
-ifneq ($(SQLITE_AMALGAM),)
-    TEST_SQLITE_OBJ := $(BUILD_DIR)/test-sqlite3.o
-endif
+# Use the SQLite amalgamation in test/sqlite (compiled with extension-loading support)
+SQLITE_AMALGAM ?= $(TEST_DIR)/sqlite/sqlite3.c
+TEST_SQLITE_OBJ := $(BUILD_DIR)/test-sqlite3.o
 
 $(BUILD_DIR)/unittest.o: $(TEST_DIR)/unittest.c | $(BUILD_DIR)
 	@echo "Compiling unittest.c..."
@@ -416,7 +413,7 @@ $(BUILD_DIR)/test-%.o: $(SRC_DIR)/%.m | $(BUILD_DIR)
 
 $(BUILD_DIR)/test-sqlite3.o: $(SQLITE_AMALGAM) | $(BUILD_DIR)
 	@echo "Compiling sqlite3.c (amalgamation)..."
-	@$(CC) $(CFLAGS) -DSQLITE_ENABLE_FTS5 -c $< -o $@
+	@$(CC) $(CFLAGS) -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_LOAD_EXTENSION -c $< -o $@
 
 TEST_C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/test-%.o,$(C_SOURCES))
 TEST_OBJC_OBJECTS := $(patsubst $(SRC_DIR)/%.m,$(BUILD_DIR)/test-%.o,$(OBJC_SOURCES))
