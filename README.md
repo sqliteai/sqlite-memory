@@ -168,6 +168,8 @@ This makes all sync functions safe to call repeatedly - for example, on a cron s
 
 Multiple agents can share and merge knowledge without any coordination. Each agent works independently with its own local SQLite database, syncing through a shared [SQLiteCloud](https://sqlitecloud.io/) managed database when connectivity is available.
 
+> Upgrade note: if sync was enabled with a sqlite-memory version earlier than `1.0.0`, you must set it up again from scratch after upgrading. Version `1.0.0` changed the internal table declarations used by sync, so existing pre-`1.0.0` synced databases are not compatible with the new schema.
+
 Enable sync on a database connection before ingesting content:
 
 ```sql

@@ -15,6 +15,7 @@
 #include "sqlite3.h"
 #endif
 
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <float.h>
@@ -266,10 +267,12 @@ static void vMemorySearchUpdateAccess(sqlite3 *db, vMemorySearchCursor *c) {
     if (rc != SQLITE_OK) return;
 
     sqlite3_int64 now = (sqlite3_int64)time(NULL);
+    char hash_hex[17];
 
     for (int i = 0; i < c->count; i++) {
+        snprintf(hash_hex, sizeof(hash_hex), "%016llx", (unsigned long long)(uint64_t)c->hash[i]);
         sqlite3_bind_int64(vm, 1, now);
-        sqlite3_bind_int64(vm, 2, c->hash[i]);
+        sqlite3_bind_text(vm, 2, hash_hex, -1, SQLITE_STATIC);
         sqlite3_step(vm);
         sqlite3_reset(vm);
     }
@@ -346,8 +349,9 @@ static int dbmem_fts_search (sqlite3 *db, vMemorySearchCursor *c, const char *in
         if (rank < rank_min) rank_min = rank;
         if (rank > rank_max) rank_max = rank;
         
+        const char *hash_text = (const char *)sqlite3_column_text(vm, 1);
         c->fts.rank[count] = rank;
-        c->fts.hash[count] = sqlite3_column_int64(vm, 1);
+        c->fts.hash[count] = (sqlite3_int64)(uint64_t)strtoull(hash_text ? hash_text : "0", NULL, 16);
         c->fts.seq[count] = sqlite3_column_int64(vm, 2);
         c->fts.count++;
         
@@ -408,8 +412,9 @@ static int dbmem_semantic_search (sqlite3 *db, vMemorySearchCursor *c, float *em
         else if (rc != SQLITE_ROW) break;
         
         // SQLITE_ROW
+        const char *hash_text = (const char *)sqlite3_column_text(vm, 1);
         c->semantic.rank[count] = sqlite3_column_double(vm, 0);
-        c->semantic.hash[count] = sqlite3_column_int64(vm, 1);
+        c->semantic.hash[count] = (sqlite3_int64)(uint64_t)strtoull(hash_text ? hash_text : "0", NULL, 16);
         c->semantic.seq[count] = sqlite3_column_int64(vm, 2);
         c->semantic.count++;
         
@@ -528,25 +533,28 @@ static int vMemorySearchCursorColumn (sqlite3_vtab_cursor *cur, sqlite3_context 
     vMemorySearchCursor *c = (vMemorySearchCursor *)cur;
     sqlite3 *db = ((vMemorySearchTable *)cur->pVtab)->db;
     
+    char hash_hex[17];
+    snprintf(hash_hex, sizeof(hash_hex), "%016llx", (unsigned long long)(uint64_t)c->hash[c->index]);
+
     switch (iCol) {
         case SEARCH_COLUMN_HASH:
-            sqlite3_result_int64(context, c->hash[c->index]);
+            sqlite3_result_text(context, hash_hex, 16, SQLITE_TRANSIENT);
             break;
-            
+
         case SEARCH_COLUMN_SEQ:
             sqlite3_result_int64(context, c->seq[c->index]);
             break;
-            
+
         case SEARCH_COLUMN_RANKING:
             sqlite3_result_double(context, c->rank[c->index]);
             break;
-            
+
         case SEARCH_COLUMN_PATH:
         case SEARCH_COLUMN_SNIPPET:{
             const char *sql = (iCol == SEARCH_COLUMN_PATH) ? path_sql : snippet_sql;
             sqlite3_stmt *vm = NULL;
             if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(vm, 1, c->hash[c->index]);
+                sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
                 if (iCol == SEARCH_COLUMN_SNIPPET) sqlite3_bind_int64(vm, 2, c->seq[c->index]);
                 if (sqlite3_step(vm) == SQLITE_ROW) sqlite3_result_value(context, sqlite3_column_value(vm, 0));
             }

@@ -1355,6 +1355,194 @@ static int exec_get_text(sqlite3 *db, const char *sql, char *result, size_t max_
     return rc;
 }
 
+typedef struct {
+    int init_calls;
+    int set_column_calls;
+    int set_filter_calls;
+    int clear_filter_calls;
+    int cleanup_calls;
+    int fail_init;
+    int fail_set_column;
+    int fail_set_filter;
+    int fail_clear_filter;
+    int fail_cleanup;
+} fake_cloudsync_t;
+
+static void fake_cloudsync_result(sqlite3_context *context, int rc) {
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+    sqlite3_result_int(context, 1);
+}
+
+static void fake_cloudsync_version(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    UNUSED_PARAM(argv);
+    sqlite3_result_text(context, "test-cloudsync", -1, SQLITE_STATIC);
+}
+
+static void fake_cloudsync_init(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    fake_cloudsync_t *state = (fake_cloudsync_t *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+    const char *algo = (const char *)sqlite3_value_text(argv[1]);
+
+    state->init_calls++;
+    if (state->fail_init) {
+        sqlite3_result_error(context, "fake cloudsync_init failed", -1);
+        return;
+    }
+
+    int rc = sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS cloudsync_table_settings ("
+        "tbl_name TEXT NOT NULL COLLATE NOCASE, "
+        "col_name TEXT NOT NULL COLLATE NOCASE, "
+        "key TEXT, value TEXT, "
+        "PRIMARY KEY(tbl_name,col_name,key));",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        fake_cloudsync_result(context, rc);
+        return;
+    }
+
+    char *sql = sqlite3_mprintf(
+        "REPLACE INTO cloudsync_table_settings (tbl_name, col_name, key, value) "
+        "VALUES ('%q', '*', 'algo', '%q');",
+        table, algo);
+    if (!sql) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    fake_cloudsync_result(context, rc);
+}
+
+static void fake_cloudsync_set_column(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    fake_cloudsync_t *state = (fake_cloudsync_t *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+    const char *column = (const char *)sqlite3_value_text(argv[1]);
+    const char *key = (const char *)sqlite3_value_text(argv[2]);
+    const char *value = (const char *)sqlite3_value_text(argv[3]);
+
+    state->set_column_calls++;
+    if (state->fail_set_column) {
+        sqlite3_result_error(context, "fake cloudsync_set_column failed", -1);
+        return;
+    }
+
+    char *sql = sqlite3_mprintf(
+        "REPLACE INTO cloudsync_table_settings (tbl_name, col_name, key, value) "
+        "VALUES ('%q', '%q', '%q', '%q');",
+        table, column, key, value);
+    if (!sql) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    fake_cloudsync_result(context, rc);
+}
+
+static void fake_cloudsync_set_filter(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    fake_cloudsync_t *state = (fake_cloudsync_t *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+    const char *filter = (const char *)sqlite3_value_text(argv[1]);
+
+    state->set_filter_calls++;
+    if (state->fail_set_filter) {
+        sqlite3_result_error(context, "fake cloudsync_set_filter failed", -1);
+        return;
+    }
+
+    char *sql = sqlite3_mprintf(
+        "REPLACE INTO cloudsync_table_settings (tbl_name, col_name, key, value) "
+        "VALUES ('%q', '*', 'filter', '%q');",
+        table, filter);
+    if (!sql) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    fake_cloudsync_result(context, rc);
+}
+
+static void fake_cloudsync_clear_filter(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    fake_cloudsync_t *state = (fake_cloudsync_t *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+
+    state->clear_filter_calls++;
+    if (state->fail_clear_filter) {
+        sqlite3_result_error(context, "fake cloudsync_clear_filter failed", -1);
+        return;
+    }
+
+    char *sql = sqlite3_mprintf(
+        "DELETE FROM cloudsync_table_settings "
+        "WHERE tbl_name='%q' AND col_name='*' AND key='filter';",
+        table);
+    if (!sql) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    fake_cloudsync_result(context, rc);
+}
+
+static void fake_cloudsync_cleanup(sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+    fake_cloudsync_t *state = (fake_cloudsync_t *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    const char *table = (const char *)sqlite3_value_text(argv[0]);
+
+    state->cleanup_calls++;
+    if (state->fail_cleanup) {
+        sqlite3_result_error(context, "fake cloudsync_cleanup failed", -1);
+        return;
+    }
+
+    char *sql = sqlite3_mprintf(
+        "DELETE FROM cloudsync_table_settings WHERE tbl_name='%q';",
+        table);
+    if (!sql) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    fake_cloudsync_result(context, rc);
+}
+
+static int install_fake_cloudsync(sqlite3 *db, fake_cloudsync_t *state) {
+    int rc = sqlite3_create_function_v2(db, "cloudsync_version", 0, SQLITE_UTF8, state, fake_cloudsync_version, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_create_function_v2(db, "cloudsync_init", 3, SQLITE_UTF8, state, fake_cloudsync_init, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_create_function_v2(db, "cloudsync_set_column", 4, SQLITE_UTF8, state, fake_cloudsync_set_column, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_create_function_v2(db, "cloudsync_set_filter", 2, SQLITE_UTF8, state, fake_cloudsync_set_filter, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_create_function_v2(db, "cloudsync_clear_filter", 1, SQLITE_UTF8, state, fake_cloudsync_clear_filter, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+    return sqlite3_create_function_v2(db, "cloudsync_cleanup", 1, SQLITE_UTF8, state, fake_cloudsync_cleanup, NULL, NULL, NULL);
+}
+
 TEST(sqlite_memory_version) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -1364,6 +1552,7 @@ TEST(sqlite_memory_version) {
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(strlen(version) > 0);
     ASSERT(strstr(version, ".") != NULL);  // Version should contain a dot
+    ASSERT_STR_EQ(version, "1.0.0");
 
     sqlite3_close(db);
 }
@@ -1385,7 +1574,7 @@ TEST(sqlite_memory_delete_nonexistent) {
     ASSERT(db != NULL);
 
     sqlite3_int64 result;
-    int rc = exec_get_int(db, "SELECT memory_delete(12345);", &result);
+    int rc = exec_get_int(db, "SELECT memory_delete('0000000000003039');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 0);  // Should return 0 (no rows deleted)
 
@@ -1408,14 +1597,15 @@ TEST(sqlite_schema_has_timestamps) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Check that schema includes created_at column
-    char sql[256];
+    // Check that schema includes created_at column and uses TEXT hash (1.0.0+)
+    char sql[512];
     int rc = exec_get_text(db,
         "SELECT sql FROM sqlite_master WHERE name='dbmem_content';",
         sql, sizeof(sql));
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(strstr(sql, "created_at") != NULL);
     ASSERT(strstr(sql, "last_accessed") != NULL);
+    ASSERT(strstr(sql, "hash TEXT") != NULL);
 
     sqlite3_close(db);
 }
@@ -1425,10 +1615,10 @@ TEST(sqlite_direct_insert_with_timestamp) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert a test record directly
+    // Insert a test record directly (hash is now TEXT, 16-char hex)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (123, 'test/path', 'test value', 10, 'ctx1', strftime('%s','now'));",
+        "VALUES ('000000000000007b', 'test/path', 'test value', 10, 'ctx1', strftime('%s','now'));",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1440,7 +1630,7 @@ TEST(sqlite_direct_insert_with_timestamp) {
 
     // Verify created_at was set
     sqlite3_int64 created_at;
-    rc = exec_get_int(db, "SELECT created_at FROM dbmem_content WHERE hash=123;", &created_at);
+    rc = exec_get_int(db, "SELECT created_at FROM dbmem_content WHERE hash='000000000000007b';", &created_at);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(created_at > 0);  // Should be a valid Unix timestamp
 
@@ -1451,16 +1641,16 @@ TEST(sqlite_memory_delete_direct) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert a test record directly
+    // Insert a test record directly (hash is now TEXT, 16-char hex; 456 = 0x1c8)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (456, 'test/path2', 'test value 2', 12, 'ctx2', strftime('%s','now'));",
+        "VALUES ('00000000000001c8', 'test/path2', 'test value 2', 12, 'ctx2', strftime('%s','now'));",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
-    // Delete it
+    // Delete it using the TEXT hash
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_delete(456);", &result);
+    rc = exec_get_int(db, "SELECT memory_delete('00000000000001c8');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 1);  // Should have deleted 1 row
 
@@ -1477,12 +1667,13 @@ TEST(sqlite_memory_delete_context_direct) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert test records with different contexts
+    // Insert test records with different contexts (hashes as 16-char hex)
+    // 100=0x64, 101=0x65, 102=0x66
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
-        "(100, 'path1', 'v1', 2, 'ctx_a', 0), "
-        "(101, 'path2', 'v2', 2, 'ctx_a', 0), "
-        "(102, 'path3', 'v3', 2, 'ctx_b', 0);",
+        "('0000000000000064', 'path1', 'v1', 2, 'ctx_a', 0), "
+        "('0000000000000065', 'path2', 'v2', 2, 'ctx_a', 0), "
+        "('0000000000000066', 'path3', 'v3', 2, 'ctx_b', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1511,11 +1702,11 @@ TEST(sqlite_memory_clear_direct) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert test records
+    // Insert test records (200=0xc8, 201=0xc9)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
-        "(200, 'p1', 'v1', 2, 'c1', 0), "
-        "(201, 'p2', 'v2', 2, 'c2', 0);",
+        "('00000000000000c8', 'p1', 'v1', 2, 'c1', 0), "
+        "('00000000000000c9', 'p2', 'v2', 2, 'c2', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1538,39 +1729,39 @@ TEST(sqlite_memory_delete_with_vault_data) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert into content and vault tables
+    // Insert into content and vault tables (300 = 0x12c)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (300, 'path300', 'value', 5, 'ctx', 0);",
+        "VALUES ('000000000000012c', 'path300', 'value', 5, 'ctx', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) "
-        "VALUES (300, 0, X'00000000', 0, 5), (300, 1, X'00000000', 5, 5);",
+        "VALUES ('000000000000012c', 0, X'00000000', 0, 5), ('000000000000012c', 1, X'00000000', 5, 5);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Verify vault has data
     sqlite3_int64 vault_count;
-    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash=300;", &vault_count);
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash='000000000000012c';", &vault_count);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(vault_count, 2);
 
-    // Delete by hash
+    // Delete by hash (TEXT)
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_delete(300);", &result);
+    rc = exec_get_int(db, "SELECT memory_delete('000000000000012c');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 1);
 
     // Verify content is gone
     sqlite3_int64 content_count;
-    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE hash=300;", &content_count);
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE hash='000000000000012c';", &content_count);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(content_count, 0);
 
     // Verify vault is also gone
-    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash=300;", &vault_count);
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash='000000000000012c';", &vault_count);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(vault_count, 0);
 
@@ -1581,21 +1772,21 @@ TEST(sqlite_memory_delete_twice) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert a record
+    // Insert a record (400 = 0x190)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (400, 'path400', 'value', 5, 'ctx', 0);",
+        "VALUES ('0000000000000190', 'path400', 'value', 5, 'ctx', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Delete first time - should return 1
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_delete(400);", &result);
+    rc = exec_get_int(db, "SELECT memory_delete('0000000000000190');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 1);
 
     // Delete second time - should return 0
-    rc = exec_get_int(db, "SELECT memory_delete(400);", &result);
+    rc = exec_get_int(db, "SELECT memory_delete('0000000000000190');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 0);
 
@@ -1606,12 +1797,12 @@ TEST(sqlite_memory_delete_context_null) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert records - some with NULL context, some with context
+    // Insert records - some with NULL context, some with context (500=0x1f4, 501=0x1f5, 502=0x1f6)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
-        "(500, 'p1', 'v1', 2, NULL, 0), "
-        "(501, 'p2', 'v2', 2, NULL, 0), "
-        "(502, 'p3', 'v3', 2, 'has_context', 0);",
+        "('00000000000001f4', 'p1', 'v1', 2, NULL, 0), "
+        "('00000000000001f5', 'p2', 'v2', 2, NULL, 0), "
+        "('00000000000001f6', 'p3', 'v3', 2, 'has_context', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1643,14 +1834,21 @@ TEST(sqlite_memory_delete_wrong_type) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Try to call memory_delete with TEXT instead of INTEGER
+    // memory_delete now expects TEXT; passing an INTEGER should return an error
     sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(db, "SELECT memory_delete('not_a_number');", -1, &stmt, NULL);
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_delete(42);", -1, &stmt, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = sqlite3_step(stmt);
-    // Should return an error
-    ASSERT(rc == SQLITE_ERROR || rc == SQLITE_ROW);  // Implementation may vary
+    ASSERT_EQ(rc, SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    // Passing a TEXT hash (even one that doesn't match any row) should succeed, returning 0
+    rc = sqlite3_prepare_v2(db, "SELECT memory_delete('0000000000000000');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    ASSERT_EQ(sqlite3_column_int64(stmt, 0), 0);
     sqlite3_finalize(stmt);
 
     sqlite3_close(db);
@@ -1705,16 +1903,16 @@ TEST(sqlite_memory_created_at_valid_range) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert with current timestamp
+    // Insert with current timestamp (600 = 0x258)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (600, 'path600', 'value', 5, 'ctx', strftime('%s','now'));",
+        "VALUES ('0000000000000258', 'path600', 'value', 5, 'ctx', strftime('%s','now'));",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Get the created_at value
     sqlite3_int64 created_at;
-    rc = exec_get_int(db, "SELECT created_at FROM dbmem_content WHERE hash=600;", &created_at);
+    rc = exec_get_int(db, "SELECT created_at FROM dbmem_content WHERE hash='0000000000000258';", &created_at);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Should be greater than 0
@@ -1736,22 +1934,22 @@ TEST(sqlite_memory_clear_with_vault_fts) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert into all tables
+    // Insert into all tables (700 = 0x2bc)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (700, 'path700', 'value', 5, 'ctx', 0);",
+        "VALUES ('00000000000002bc', 'path700', 'value', 5, 'ctx', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) "
-        "VALUES (700, 0, X'00000000', 0, 5);",
+        "VALUES ('00000000000002bc', 0, X'00000000', 0, 5);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_vault_fts (content, hash, seq, context) "
-        "VALUES ('test content', 700, 0, 'ctx');",
+        "VALUES ('test content', '00000000000002bc', 0, 'ctx');",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1778,14 +1976,15 @@ TEST(sqlite_memory_clear_with_vault_fts) {
     sqlite3_close(db);
 }
 
-// Helper to insert a fake dbmem_content entry with a known path, hash, and length
-static int insert_fake_content(sqlite3 *db, sqlite3_int64 hash, const char *path, const char *context, sqlite3_int64 length) {
+// Helper to insert a fake dbmem_content entry with a known path, hash, and length.
+// hash_hex must be a 16-char lowercase hex string (e.g. "000000000000007b").
+static int insert_fake_content(sqlite3 *db, const char *hash_hex, const char *path, const char *context, sqlite3_int64 length) {
     sqlite3_stmt *vm = NULL;
     const char *sql = "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
                       "VALUES (?1, ?2, 'fake', ?3, ?4, 0);";
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) return rc;
-    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 2, path, -1, SQLITE_STATIC);
     sqlite3_bind_int64(vm, 3, length);
     if (context) sqlite3_bind_text(vm, 4, context, -1, SQLITE_STATIC);
@@ -1793,6 +1992,11 @@ static int insert_fake_content(sqlite3 *db, sqlite3_int64 hash, const char *path
     rc = sqlite3_step(vm);
     sqlite3_finalize(vm);
     return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+
+// Helper: convert uint64_t hash to 16-char lowercase hex string
+static void hash_to_hex(uint64_t hash, char buf[17]) {
+    snprintf(buf, 17, "%016llx", (unsigned long long)hash);
 }
 
 TEST(sqlite_sync_directory_removes_deleted) {
@@ -1820,10 +2024,13 @@ TEST(sqlite_sync_directory_removes_deleted) {
     uint64_t keep_hash = dbmem_hash_compute(buf, (size_t)len);
     dbmemory_free(buf);
 
-    int rc = insert_fake_content(db, (sqlite3_int64)keep_hash, file_keep, NULL, len);
+    char keep_hash_hex[17];
+    hash_to_hex(keep_hash, keep_hash_hex);
+
+    int rc = insert_fake_content(db, keep_hash_hex, file_keep, NULL, len);
     ASSERT_EQ(rc, SQLITE_OK);
 
-    rc = insert_fake_content(db, 99999, "/tmp/dbmem_test_sync_del/gone.md", NULL, 4);
+    rc = insert_fake_content(db, "000000000001869f", "/tmp/dbmem_test_sync_del/gone.md", NULL, 4);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Verify 2 entries before sync
@@ -1862,20 +2069,20 @@ TEST(sqlite_sync_directory_removes_all_deleted) {
     rmdir_p(test_dir);
     mkdir_p(test_dir);  // empty directory
 
-    // Insert fake entries pointing to files that don't exist
-    int rc = insert_fake_content(db, 1001, "/tmp/dbmem_test_sync_allgone/a.md", "ctx", 4);
+    // Insert fake entries pointing to files that don't exist (1001=0x3e9, 1002=0x3ea, 1003=0x3eb)
+    int rc = insert_fake_content(db, "00000000000003e9", "/tmp/dbmem_test_sync_allgone/a.md", "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
-    rc = insert_fake_content(db, 1002, "/tmp/dbmem_test_sync_allgone/b.md", "ctx", 4);
+    rc = insert_fake_content(db, "00000000000003ea", "/tmp/dbmem_test_sync_allgone/b.md", "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
-    rc = insert_fake_content(db, 1003, "/tmp/dbmem_test_sync_allgone/c.md", "ctx", 4);
+    rc = insert_fake_content(db, "00000000000003eb", "/tmp/dbmem_test_sync_allgone/c.md", "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Also insert vault entries to verify cascade delete
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES "
-        "(1001, 0, X'00000000', 0, 4), "
-        "(1002, 0, X'00000000', 0, 4), "
-        "(1003, 0, X'00000000', 0, 4);",
+        "('00000000000003e9', 0, X'00000000', 0, 4), "
+        "('00000000000003ea', 0, X'00000000', 0, 4), "
+        "('00000000000003eb', 0, X'00000000', 0, 4);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1918,7 +2125,9 @@ TEST(sqlite_sync_directory_skips_unchanged) {
 
     // Compute the hash and pre-insert the entry
     uint64_t hash = dbmem_hash_compute(content, strlen(content));
-    int rc = insert_fake_content(db, (sqlite3_int64)hash, file, "notes", (sqlite3_int64)strlen(content));
+    char hash_hex[17];
+    hash_to_hex(hash, hash_hex);
+    int rc = insert_fake_content(db, hash_hex, file, "notes", (sqlite3_int64)strlen(content));
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Sync — file exists with matching hash, should be skipped
@@ -1972,12 +2181,12 @@ TEST(sqlite_cache_clear_with_data) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert some fake cache entries
+    // Insert some fake cache entries (text_hash is now TEXT hex; 111=0x6f, 222=0xde, 333=0x14d)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
-        "(111, 'openai', 'text-embedding-3-small', X'00000000', 1), "
-        "(222, 'openai', 'text-embedding-3-small', X'00000000', 1), "
-        "(333, 'local', 'nomic', X'00000000', 1);",
+        "('000000000000006f', 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "('00000000000000de', 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "('000000000000014d', 'local', 'nomic', X'00000000', 1);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -2000,12 +2209,12 @@ TEST(sqlite_cache_clear_by_provider_model) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert cache entries for different provider/model combos
+    // Insert cache entries for different provider/model combos (text_hash as TEXT hex)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
-        "(111, 'openai', 'text-embedding-3-small', X'00000000', 1), "
-        "(222, 'openai', 'text-embedding-3-small', X'00000000', 1), "
-        "(333, 'local', 'nomic', X'00000000', 1);",
+        "('000000000000006f', 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "('00000000000000de', 'openai', 'text-embedding-3-small', X'00000000', 1), "
+        "('000000000000014d', 'local', 'nomic', X'00000000', 1);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -2090,14 +2299,14 @@ TEST(sqlite_cache_eviction) {
     int rc = exec_get_int(db, "SELECT memory_set_option('cache_max_entries', 3);", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
-    // Insert 5 entries (rowids 1-5)
+    // Insert 5 entries (rowids 1-5; text_hash as TEXT hex)
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
-        "(1, 'p', 'm', X'00000000', 1), "
-        "(2, 'p', 'm', X'00000000', 1), "
-        "(3, 'p', 'm', X'00000000', 1), "
-        "(4, 'p', 'm', X'00000000', 1), "
-        "(5, 'p', 'm', X'00000000', 1);",
+        "('0000000000000001', 'p', 'm', X'00000000', 1), "
+        "('0000000000000002', 'p', 'm', X'00000000', 1), "
+        "('0000000000000003', 'p', 'm', X'00000000', 1), "
+        "('0000000000000004', 'p', 'm', X'00000000', 1), "
+        "('0000000000000005', 'p', 'm', X'00000000', 1);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -2114,9 +2323,9 @@ TEST(sqlite_cache_eviction) {
     // Insert exactly 3 (at limit)
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
-        "(10, 'p', 'm', X'00000000', 1), "
-        "(11, 'p', 'm', X'00000000', 1), "
-        "(12, 'p', 'm', X'00000000', 1);",
+        "('000000000000000a', 'p', 'm', X'00000000', 1), "
+        "('000000000000000b', 'p', 'm', X'00000000', 1), "
+        "('000000000000000c', 'p', 'm', X'00000000', 1);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -2132,14 +2341,14 @@ TEST(sqlite_cache_no_eviction_when_unlimited) {
     ASSERT(db != NULL);
 
     // Default cache_max_entries is 0 (no limit)
-    // Insert many entries, none should be evicted
+    // Insert many entries, none should be evicted (text_hash as TEXT hex)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES "
-        "(1, 'p', 'm', X'00000000', 1), "
-        "(2, 'p', 'm', X'00000000', 1), "
-        "(3, 'p', 'm', X'00000000', 1), "
-        "(4, 'p', 'm', X'00000000', 1), "
-        "(5, 'p', 'm', X'00000000', 1);",
+        "('0000000000000001', 'p', 'm', X'00000000', 1), "
+        "('0000000000000002', 'p', 'm', X'00000000', 1), "
+        "('0000000000000003', 'p', 'm', X'00000000', 1), "
+        "('0000000000000004', 'p', 'm', X'00000000', 1), "
+        "('0000000000000005', 'p', 'm', X'00000000', 1);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -2181,18 +2390,18 @@ TEST(sqlite_memory_delete_context_with_vault) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    // Insert records with different contexts into content and vault
+    // Insert records with different contexts into content and vault (800=0x320, 801=0x321)
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
-        "(800, 'p1', 'v1', 2, 'delete_me', 0), "
-        "(801, 'p2', 'v2', 2, 'keep_me', 0);",
+        "('0000000000000320', 'p1', 'v1', 2, 'delete_me', 0), "
+        "('0000000000000321', 'p2', 'v2', 2, 'keep_me', 0);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = sqlite3_exec(db,
         "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES "
-        "(800, 0, X'00000000', 0, 2), "
-        "(801, 0, X'00000000', 0, 2);",
+        "('0000000000000320', 0, X'00000000', 0, 2), "
+        "('0000000000000321', 0, X'00000000', 0, 2);",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -2213,9 +2422,10 @@ TEST(sqlite_memory_delete_context_with_vault) {
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(count, 1);
 
-    rc = exec_get_int(db, "SELECT hash FROM dbmem_vault;", &result);
+    char vault_hash[32];
+    rc = exec_get_text(db, "SELECT hash FROM dbmem_vault;", vault_hash, sizeof(vault_hash));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_EQ(result, 801);
+    ASSERT_STR_EQ(vault_hash, "0000000000000321");
 
     sqlite3_close(db);
 }
@@ -2360,6 +2570,524 @@ TEST(sqlite_custom_provider_init_error) {
     rc = sqlite3_step(stmt);
     ASSERT_EQ(rc, SQLITE_ERROR);  // should be an error
     sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migration) {
+    // Create an in-memory database with the OLD schema (INTEGER hash, pre-1.0.0)
+    // then call sqlite3_memory_init and verify migration happened correctly.
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Build old schema manually (INTEGER hash)
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE dbmem_content ("
+        "  hash INTEGER PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash INTEGER NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));"
+        "CREATE TABLE dbmem_cache ("
+        "  text_hash INTEGER NOT NULL,"
+        "  provider TEXT NOT NULL,"
+        "  model TEXT NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  dimension INTEGER NOT NULL,"
+        "  PRIMARY KEY (text_hash, provider, model));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Insert sample data with INTEGER hash values
+    // Use small values that fit in uint64_t and round-trip cleanly through printf('%016x')
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES"
+        " (255, 'path_a', 'content a', 9, 'ctx', 1000),"
+        " (4096, 'path_b', 'content b', 9, NULL, 2000);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES"
+        " (255, 0, X'0000803f', 0, 9),"
+        " (4096, 0, X'0000803f', 0, 9);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES"
+        " (255, 'test', 'model', X'0000803f', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Run the extension init — this triggers schema migration
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Verify hash column is now TEXT
+    char schema[512];
+    rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE name='dbmem_content';",
+        schema, sizeof(schema));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(schema, "hash TEXT") != NULL);
+
+    // Verify the content rows are present with hex-encoded hashes
+    // 255  = 0x00000000000000ff
+    // 4096 = 0x0000000000001000
+    sqlite3_int64 count;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    char hash_val[64];
+    rc = exec_get_text(db,
+        "SELECT hash FROM dbmem_content WHERE path='path_a';",
+        hash_val, sizeof(hash_val));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_val, "00000000000000ff");
+
+    rc = exec_get_text(db,
+        "SELECT hash FROM dbmem_content WHERE path='path_b';",
+        hash_val, sizeof(hash_val));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_val, "0000000000001000");
+
+    // Verify vault rows migrated correctly
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    rc = exec_get_text(db,
+        "SELECT hash FROM dbmem_vault WHERE seq=0 AND length=9 AND hash='00000000000000ff';",
+        hash_val, sizeof(hash_val));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_val, "00000000000000ff");
+
+    // Verify cache migrated correctly
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_text(db,
+        "SELECT text_hash FROM dbmem_cache;",
+        hash_val, sizeof(hash_val));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_val, "00000000000000ff");
+
+    // Verify that content data is preserved
+    sqlite3_int64 created_at;
+    rc = exec_get_int(db,
+        "SELECT created_at FROM dbmem_content WHERE hash='00000000000000ff';",
+        &created_at);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(created_at, 1000);
+
+    // Verify memory_delete works with the migrated TEXT hash
+    sqlite3_int64 deleted;
+    rc = exec_get_int(db, "SELECT memory_delete('00000000000000ff');", &deleted);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(deleted, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migration_preserves_cloudsync_filter) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    fake_cloudsync_t sync = {0};
+    rc = install_fake_cloudsync(db, &sync);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE cloudsync_table_settings ("
+        "  tbl_name TEXT NOT NULL COLLATE NOCASE,"
+        "  col_name TEXT NOT NULL COLLATE NOCASE,"
+        "  key TEXT, value TEXT,"
+        "  PRIMARY KEY(tbl_name,col_name,key));"
+        "INSERT INTO cloudsync_table_settings (tbl_name, col_name, key, value) VALUES"
+        " ('dbmem_content', '*', 'algo', 'cls'),"
+        " ('dbmem_content', 'path', 'algo', 'plain'),"
+        " ('dbmem_content', 'value', 'algo', 'block'),"
+        " ('dbmem_content', '*', 'filter', 'context IN (''ctx_a'',''ctx_b'')');"
+        "CREATE TABLE dbmem_content ("
+        "  hash INTEGER PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash INTEGER NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));"
+        "INSERT INTO dbmem_content (hash, path, value, length, context) VALUES"
+        " (255, 'path_a', 'content a', 9, 'ctx_a');"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES"
+        " (255, 0, X'0000803f', 0, 9);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(sync.cleanup_calls, 0);
+    ASSERT_EQ(sync.init_calls, 0);
+    ASSERT_EQ(sync.set_column_calls, 0);
+    ASSERT_EQ(sync.set_filter_calls, 0);
+    ASSERT_EQ(sync.clear_filter_calls, 0);
+
+    char filter[128];
+    rc = exec_get_text(db,
+        "SELECT value FROM cloudsync_table_settings "
+        "WHERE tbl_name='dbmem_content' AND col_name='*' AND key='filter';",
+        filter, sizeof(filter));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(filter, "context IN ('ctx_a','ctx_b')");
+
+    char path_algo[32];
+    rc = exec_get_text(db,
+        "SELECT value FROM cloudsync_table_settings "
+        "WHERE tbl_name='dbmem_content' AND col_name='path' AND key='algo';",
+        path_algo, sizeof(path_algo));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path_algo, "plain");
+
+    char hash_type[32];
+    rc = exec_get_text(db,
+        "SELECT type FROM pragma_table_info('dbmem_content') WHERE name='hash';",
+        hash_type, sizeof(hash_type));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_type, "TEXT");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migration_requires_cloudsync_when_synced) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE cloudsync_table_settings ("
+        "  tbl_name TEXT NOT NULL COLLATE NOCASE,"
+        "  col_name TEXT NOT NULL COLLATE NOCASE,"
+        "  key TEXT, value TEXT,"
+        "  PRIMARY KEY(tbl_name,col_name,key));"
+        "INSERT INTO cloudsync_table_settings (tbl_name, col_name, key, value) VALUES"
+        " ('dbmem_content', '*', 'algo', 'cls'),"
+        " ('dbmem_content', 'value', 'algo', 'block'),"
+        " ('dbmem_content', '*', 'filter', 'context IN (''ctx_a'')');"
+        "CREATE TABLE dbmem_content ("
+        "  hash INTEGER PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash INTEGER NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_ERROR);
+
+    char hash_type[32];
+    rc = exec_get_text(db,
+        "SELECT type FROM pragma_table_info('dbmem_content') WHERE name='hash';",
+        hash_type, sizeof(hash_type));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_type, "INTEGER");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migration_ignores_user_triggers) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    fake_cloudsync_t sync = {0};
+    rc = install_fake_cloudsync(db, &sync);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE dbmem_content ("
+        "  hash INTEGER PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash INTEGER NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));"
+        "CREATE TRIGGER user_after_insert_dbmem_content "
+        "AFTER INSERT ON dbmem_content BEGIN SELECT 1; END;",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(sync.cleanup_calls, 0);
+    ASSERT_EQ(sync.init_calls, 0);
+    ASSERT_EQ(sync.set_column_calls, 0);
+    ASSERT_EQ(sync.set_filter_calls, 0);
+    ASSERT_EQ(sync.clear_filter_calls, 0);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='table' AND name='cloudsync_table_settings';",
+        &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_init_repairs_stale_fts_hashes) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // Simulate a database first opened on a build without FTS5 during the
+    // hash migration: core tables are already TEXT, but the legacy FTS table
+    // still contains decimal hash strings.
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE dbmem_content ("
+        "  hash TEXT PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash TEXT NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));"
+        "CREATE VIRTUAL TABLE dbmem_vault_fts USING fts5 "
+        "  (content, hash UNINDEXED, seq UNINDEXED, context UNINDEXED);"
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES"
+        " ('00000000000000ff', 'path_a', 'content a', 9, 'ctx_a', 1000);"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES"
+        " ('00000000000000ff', 0, X'0000803f', 0, 9);"
+        "INSERT INTO dbmem_vault_fts (content, hash, seq, context) VALUES"
+        " ('content a', '255', 0, 'ctx_a');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 joined_before = -1;
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) "
+        "FROM dbmem_vault_fts AS f "
+        "JOIN dbmem_vault AS v ON f.hash = v.hash AND f.seq = v.seq;",
+        &joined_before);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(joined_before, 0);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char hash_val[64];
+    rc = exec_get_text(db,
+        "SELECT hash FROM dbmem_vault_fts WHERE seq=0;",
+        hash_val, sizeof(hash_val));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_val, "00000000000000ff");
+
+    sqlite3_int64 joined_after = -1;
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) "
+        "FROM dbmem_vault_fts AS f "
+        "JOIN dbmem_vault AS v ON f.hash = v.hash AND f.seq = v.seq;",
+        &joined_after);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(joined_after, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migration_preserves_user_schema_objects) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE dbmem_content ("
+        "  hash INTEGER PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash INTEGER NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));"
+        "CREATE TABLE dbmem_cache ("
+        "  text_hash INTEGER NOT NULL,"
+        "  provider TEXT NOT NULL,"
+        "  model TEXT NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  dimension INTEGER NOT NULL,"
+        "  PRIMARY KEY (text_hash, provider, model));"
+        "CREATE TABLE user_audit (hash TEXT);"
+        "CREATE INDEX idx_dbmem_content_context ON dbmem_content(context);"
+        "CREATE INDEX idx_dbmem_cache_provider ON dbmem_cache(provider);"
+        "CREATE TRIGGER trg_dbmem_vault_audit "
+        "AFTER INSERT ON dbmem_vault BEGIN "
+        "  INSERT INTO user_audit(hash) VALUES (NEW.hash); "
+        "END;"
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES"
+        " (255, 'path_a', 'content a', 9, 'ctx_a', 1000);"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES"
+        " (255, 0, X'0000803f', 0, 9);"
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES"
+        " (255, 'test', 'model', X'0000803f', 1);"
+        "DELETE FROM user_audit;",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='index' AND name='idx_dbmem_content_context';",
+        &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='index' AND name='idx_dbmem_cache_provider';",
+        &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='trigger' AND name='trg_dbmem_vault_audit';",
+        &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES"
+        " ('00000000000000aa', 1, X'0000803f', 0, 4);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char audit_hash[64];
+    rc = exec_get_text(db, "SELECT hash FROM user_audit;", audit_hash, sizeof(audit_hash));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(audit_hash, "00000000000000aa");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migration_preserves_dependent_views_and_foreign_keys) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "PRAGMA foreign_keys=ON;"
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "CREATE TABLE dbmem_content ("
+        "  hash INTEGER PRIMARY KEY NOT NULL,"
+        "  path TEXT NOT NULL DEFAULT '' UNIQUE,"
+        "  value TEXT DEFAULT NULL,"
+        "  length INTEGER NOT NULL DEFAULT 0,"
+        "  context TEXT DEFAULT NULL,"
+        "  created_at INTEGER DEFAULT 0,"
+        "  last_accessed INTEGER DEFAULT 0);"
+        "CREATE TABLE dbmem_vault ("
+        "  hash INTEGER NOT NULL,"
+        "  seq INTEGER NOT NULL,"
+        "  embedding BLOB NOT NULL,"
+        "  offset INTEGER NOT NULL,"
+        "  length INTEGER NOT NULL,"
+        "  PRIMARY KEY (hash, seq));"
+        "CREATE VIEW user_content_view AS "
+        "  SELECT path, context FROM dbmem_content;"
+        "CREATE TABLE user_content_refs ("
+        "  content_hash INTEGER REFERENCES dbmem_content(hash));"
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES"
+        " (255, 'path_a', 'content a', 9, 'ctx_a', 1000);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char view_sql[256];
+    rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='user_content_view';",
+        view_sql, sizeof(view_sql));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(view_sql, "dbmem_content") != NULL);
+    ASSERT(strstr(view_sql, "_dbmem_content_old") == NULL);
+
+    char fk_sql[256];
+    rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='user_content_refs';",
+        fk_sql, sizeof(fk_sql));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(fk_sql, "REFERENCES dbmem_content") != NULL);
+    ASSERT(strstr(fk_sql, "_dbmem_content_old") == NULL);
+
+    char path[64];
+    rc = exec_get_text(db, "SELECT path FROM user_content_view;", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path, "path_a");
 
     sqlite3_close(db);
 }
@@ -2520,6 +3248,15 @@ int main(int argc, char *argv[]) {
 
     printf("\nSearch oversampling tests:\n");
     RUN_TEST(sqlite_search_oversample_setting);
+
+    printf("\nSchema migration tests:\n");
+    RUN_TEST(sqlite_schema_migration);
+    RUN_TEST(sqlite_schema_migration_preserves_cloudsync_filter);
+    RUN_TEST(sqlite_schema_migration_requires_cloudsync_when_synced);
+    RUN_TEST(sqlite_schema_migration_ignores_user_triggers);
+    RUN_TEST(sqlite_schema_init_repairs_stale_fts_hashes);
+    RUN_TEST(sqlite_schema_migration_preserves_user_schema_objects);
+    RUN_TEST(sqlite_schema_migration_preserves_dependent_views_and_foreign_keys);
 
     printf("\nCustom provider tests:\n");
     RUN_TEST(sqlite_custom_provider_register);

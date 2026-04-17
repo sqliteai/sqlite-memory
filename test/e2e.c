@@ -332,12 +332,12 @@ TEST(memory_search) {
     ASSERT(rc == SQLITE_OK);
     ASSERT(sqlite3_step(stmt) == SQLITE_ROW);
 
-    int64_t hash = sqlite3_column_int64(stmt, 0);
+    const char *hash = (const char *)sqlite3_column_text(stmt, 0);
     const char *path = (const char *)sqlite3_column_text(stmt, 1);
     const char *snippet = (const char *)sqlite3_column_text(stmt, 3);
     double ranking = sqlite3_column_double(stmt, 4);
 
-    ASSERT(hash != 0);
+    ASSERT(hash != NULL && strlen(hash) == 16);
     ASSERT(path != NULL && strlen(path) > 0);
     ASSERT(snippet != NULL && strlen(snippet) > 0);
     ASSERT(ranking > 0.0 && ranking <= 1.0);
@@ -381,14 +381,15 @@ TEST(memory_search_ranking) {
 // Phase 5: Deletion
 // ============================================================================
 
-// memory_delete: delete by hash
+// memory_delete: delete by hash (hash is now TEXT, 16-char hex)
 TEST(memory_delete) {
     // Get a hash from a context-less entry
-    int64_t hash = 0;
+    char hash[17] = {0};
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(db, "SELECT hash FROM dbmem_content WHERE context IS NULL LIMIT 1;", -1, &stmt, NULL);
     ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
-    hash = sqlite3_column_int64(stmt, 0);
+    const char *h = (const char *)sqlite3_column_text(stmt, 0);
+    if (h) strncpy(hash, h, 16);
     sqlite3_finalize(stmt);
 
     result_int = 0;
@@ -396,7 +397,7 @@ TEST(memory_delete) {
     int before = result_int;
 
     char sql[128];
-    snprintf(sql, sizeof(sql), "SELECT memory_delete(%lld);", (long long)hash);
+    snprintf(sql, sizeof(sql), "SELECT memory_delete('%s');", hash);
     ASSERT_SQL_OK(db, sql);
 
     // Verify count decreased by 1

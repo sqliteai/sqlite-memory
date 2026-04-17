@@ -331,32 +331,512 @@ cleanup:
     return;
 }
 
+// MARK: - Hash helpers -
+
+// Convert uint64 hash to 16-char lowercase hex string (buf must be at least 17 bytes)
+static void dbmem_hash_to_hex (uint64_t hash, char buf[17]) {
+    snprintf(buf, 17, "%016llx", (unsigned long long)hash);
+}
+
+typedef struct {
+    char **sql;
+    int count;
+} dbmem_schema_object_list;
+
+typedef struct {
+    bool enabled;
+    dbmem_schema_object_list shadow_objects;
+    dbmem_schema_object_list triggers;
+} dbmem_cloudsync_state;
+
+static void dbmem_schema_object_list_reset (dbmem_schema_object_list *list);
+static int dbmem_schema_object_list_load_query (sqlite3 *db, const char *sql, const char *param, dbmem_schema_object_list *list);
+
+static void dbmem_cloudsync_state_reset (dbmem_cloudsync_state *state) {
+    if (!state) return;
+    dbmem_schema_object_list_reset(&state->shadow_objects);
+    dbmem_schema_object_list_reset(&state->triggers);
+    state->enabled = false;
+}
+
+static void dbmem_schema_object_list_reset (dbmem_schema_object_list *list) {
+    if (!list) return;
+    for (int i = 0; i < list->count; i++) sqlite3_free(list->sql[i]);
+    sqlite3_free(list->sql);
+    list->sql = NULL;
+    list->count = 0;
+}
+
+static int dbmem_schema_object_list_load (sqlite3 *db, const char *table_name, dbmem_schema_object_list *list) {
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT sql FROM sqlite_master "
+        "WHERE tbl_name=?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL "
+        "ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name;",
+        -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_bind_text(vm, 1, table_name, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(vm);
+        return rc;
+    }
+
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        const char *sql = (const char *)sqlite3_column_text(vm, 0);
+        char **new_sql = (char **)sqlite3_realloc64(list->sql, sizeof(char *) * (size_t)(list->count + 1));
+        if (!new_sql) {
+            sqlite3_finalize(vm);
+            return SQLITE_NOMEM;
+        }
+        list->sql = new_sql;
+        list->sql[list->count] = sqlite3_mprintf("%s", sql ? sql : "");
+        if (!list->sql[list->count]) {
+            sqlite3_finalize(vm);
+            return SQLITE_NOMEM;
+        }
+        list->count++;
+    }
+
+    sqlite3_finalize(vm);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+
+static int dbmem_schema_object_list_load_without_cloudsync (sqlite3 *db, const char *table_name, dbmem_schema_object_list *list) {
+    return dbmem_schema_object_list_load_query(db,
+        "SELECT sql FROM sqlite_master "
+        "WHERE tbl_name=?1 AND sql IS NOT NULL AND ("
+        "type='index' OR (type='trigger' AND name NOT LIKE 'cloudsync_%')) "
+        "ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name;",
+        table_name, list);
+}
+
+static int dbmem_schema_object_list_apply (sqlite3 *db, dbmem_schema_object_list *list) {
+    for (int i = 0; i < list->count; i++) {
+        int rc = sqlite3_exec(db, list->sql[i], NULL, NULL, NULL);
+        if (rc != SQLITE_OK) return rc;
+    }
+    return SQLITE_OK;
+}
+
+static int dbmem_pragma_get_int (sqlite3 *db, const char *pragma_sql, int *value) {
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, pragma_sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_ROW) {
+        *value = sqlite3_column_int(vm, 0);
+        rc = SQLITE_OK;
+    }
+    sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_schema_object_list_load_query (sqlite3 *db, const char *sql, const char *param, dbmem_schema_object_list *list) {
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    if (param) {
+        rc = sqlite3_bind_text(vm, 1, param, -1, SQLITE_STATIC);
+        if (rc != SQLITE_OK) {
+            sqlite3_finalize(vm);
+            return rc;
+        }
+    }
+
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        const char *obj_sql = (const char *)sqlite3_column_text(vm, 0);
+        char **new_sql = (char **)sqlite3_realloc64(list->sql, sizeof(char *) * (size_t)(list->count + 1));
+        if (!new_sql) {
+            sqlite3_finalize(vm);
+            return SQLITE_NOMEM;
+        }
+        list->sql = new_sql;
+        list->sql[list->count] = sqlite3_mprintf("%s", obj_sql ? obj_sql : "");
+        if (!list->sql[list->count]) {
+            sqlite3_finalize(vm);
+            return SQLITE_NOMEM;
+        }
+        list->count++;
+    }
+
+    sqlite3_finalize(vm);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+
+static int dbmem_schema_load_cloudsync_state (sqlite3 *db, dbmem_cloudsync_state *state) {
+    sqlite3_stmt *vm = NULL;
+    bool has_table = false;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='cloudsync_table_settings' LIMIT 1;",
+        -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    if (sqlite3_step(vm) == SQLITE_ROW) has_table = true;
+    sqlite3_finalize(vm);
+    vm = NULL;
+
+    if (!has_table) return SQLITE_OK;
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM cloudsync_table_settings "
+        "WHERE tbl_name='dbmem_content' AND col_name='*' AND key='algo' "
+        "LIMIT 1;",
+        -1, &vm, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    if (sqlite3_step(vm) == SQLITE_ROW) state->enabled = true;
+    sqlite3_finalize(vm);
+    vm = NULL;
+
+    if (!state->enabled) return SQLITE_OK;
+
+    rc = dbmem_schema_object_list_load_query(db,
+        "SELECT sql FROM sqlite_master "
+        "WHERE name LIKE 'dbmem_content_cloudsync%' AND type IN ('table', 'index') AND sql IS NOT NULL "
+        "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name;",
+        NULL, &state->shadow_objects);
+    if (rc != SQLITE_OK) return rc;
+
+    return dbmem_schema_object_list_load_query(db,
+        "SELECT sql FROM sqlite_master "
+        "WHERE tbl_name=?1 AND type='trigger' AND name LIKE 'cloudsync_%' AND sql IS NOT NULL "
+        "ORDER BY name;",
+        "dbmem_content", &state->triggers);
+}
+
+static bool dbmem_fts5_available (sqlite3 *db) {
+    int rc = sqlite3_exec(db,
+        "CREATE VIRTUAL TABLE temp._dbmem_fts5_probe USING fts5(x);",
+        NULL, NULL, NULL);
+    sqlite3_exec(db, "DROP TABLE IF EXISTS temp._dbmem_fts5_probe;", NULL, NULL, NULL);
+    return (rc == SQLITE_OK);
+}
+
+static bool dbmem_fts_table_needs_hash_migration (sqlite3 *db) {
+    sqlite3_stmt *vm = NULL;
+    bool needs = false;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT 1 "
+        "FROM dbmem_vault_fts AS f "
+        "LEFT JOIN dbmem_vault AS v_direct "
+        "  ON f.hash = v_direct.hash AND f.seq = v_direct.seq "
+        "JOIN dbmem_vault AS v_migrated "
+        "  ON printf('%016x', CAST(f.hash AS INTEGER)) = v_migrated.hash "
+        " AND f.seq = v_migrated.seq "
+        "WHERE v_direct.hash IS NULL "
+        "LIMIT 1;",
+        -1, &vm, NULL);
+    if (rc != SQLITE_OK) return false;
+    if (sqlite3_step(vm) == SQLITE_ROW) needs = true;
+    sqlite3_finalize(vm);
+    return needs;
+}
+
+static int dbmem_fts_migrate_hashes (sqlite3 *db) {
+    int rc = sqlite3_exec(db,
+        "CREATE TEMP TABLE _fts_backup AS "
+        "SELECT content, hash, seq, context FROM dbmem_vault_fts;",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_exec(db, "DROP TABLE dbmem_vault_fts;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_exec(db, "DROP TABLE IF EXISTS _fts_backup;", NULL, NULL, NULL);
+        return rc;
+    }
+
+    rc = sqlite3_exec(db,
+        "CREATE VIRTUAL TABLE dbmem_vault_fts USING fts5 "
+        "(content, hash UNINDEXED, seq UNINDEXED, context UNINDEXED);",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_exec(db, "DROP TABLE IF EXISTS _fts_backup;", NULL, NULL, NULL);
+        return rc;
+    }
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault_fts (content, hash, seq, context) "
+        "SELECT content, printf('%016x', CAST(hash AS INTEGER)), seq, context "
+        "FROM _fts_backup;",
+        NULL, NULL, NULL);
+    sqlite3_exec(db, "DROP TABLE IF EXISTS _fts_backup;", NULL, NULL, NULL);
+    return rc;
+}
+
 // MARK: - Database -
 
+// Check if the existing schema uses INTEGER for the hash column (pre-1.0.0 schema)
+static bool dbmem_schema_needs_migration (sqlite3 *db) {
+    static const char *sql = "SELECT type FROM pragma_table_info('dbmem_content') WHERE name='hash' LIMIT 1;";
+    sqlite3_stmt *vm = NULL;
+    bool needs = false;
+    if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) != SQLITE_OK) return false;
+    if (sqlite3_step(vm) == SQLITE_ROW) {
+        const char *type = (const char *)sqlite3_column_text(vm, 0);
+        if (type && strcasecmp(type, "INTEGER") == 0) needs = true;
+    }
+    sqlite3_finalize(vm);
+    return needs;
+}
+
+// Migrate schema from INTEGER hash (pre-1.0.0) to TEXT hash (1.0.0+)
+// Hashes are converted to 16-char lowercase hex strings.
+static int dbmem_schema_migrate (sqlite3 *db) {
+    int rc = SQLITE_OK;
+    bool in_savepoint = false;
+    int old_foreign_keys = 0;
+    int old_legacy_alter_table = 0;
+    bool altered_pragmas = false;
+    dbmem_cloudsync_state sync_state = {0};
+    dbmem_schema_object_list content_objects = {0};
+    dbmem_schema_object_list vault_objects = {0};
+    dbmem_schema_object_list cache_objects = {0};
+    sqlite3_stmt *vm = NULL;
+    bool has_cache = false;
+    bool has_fts = false;
+
+    rc = dbmem_schema_load_cloudsync_state(db, &sync_state);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    if (sync_state.enabled) {
+        // Refuse to migrate a synced database unless sqlite-sync is loaded on this
+        // connection, otherwise the rebuilt table would silently stop syncing.
+        rc = sqlite3_exec(db, "SELECT cloudsync_version();", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto cleanup;
+    }
+
+    rc = dbmem_pragma_get_int(db, "PRAGMA foreign_keys;", &old_foreign_keys);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = dbmem_pragma_get_int(db, "PRAGMA legacy_alter_table;", &old_legacy_alter_table);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "PRAGMA foreign_keys=OFF;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "PRAGMA legacy_alter_table=ON;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    altered_pragmas = true;
+
+    rc = sqlite3_exec(db, "SAVEPOINT dbmem_schema_migrate;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    in_savepoint = true;
+
+    if (sync_state.enabled) rc = dbmem_schema_object_list_load_without_cloudsync(db, "dbmem_content", &content_objects);
+    else rc = dbmem_schema_object_list_load(db, "dbmem_content", &content_objects);
+    if (rc != SQLITE_OK) goto rollback;
+
+    // --- dbmem_content ---
+    rc = sqlite3_exec(db, "ALTER TABLE dbmem_content RENAME TO _dbmem_content_old;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_content ("
+        "hash TEXT PRIMARY KEY NOT NULL, "
+        "path TEXT NOT NULL DEFAULT '' UNIQUE, "
+        "value TEXT DEFAULT NULL, "
+        "length INTEGER NOT NULL DEFAULT 0, "
+        "context TEXT DEFAULT NULL, "
+        "created_at INTEGER DEFAULT 0, "
+        "last_accessed INTEGER DEFAULT 0);",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content "
+        "SELECT printf('%016x', hash), path, value, length, context, created_at, last_accessed "
+        "FROM _dbmem_content_old;",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db, "DROP TABLE _dbmem_content_old;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = dbmem_schema_object_list_load(db, "dbmem_vault", &vault_objects);
+    if (rc != SQLITE_OK) goto rollback;
+
+    // --- dbmem_vault ---
+    rc = sqlite3_exec(db, "ALTER TABLE dbmem_vault RENAME TO _dbmem_vault_old;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_vault ("
+        "hash TEXT NOT NULL, "
+        "seq INTEGER NOT NULL, "
+        "embedding BLOB NOT NULL, "
+        "offset INTEGER NOT NULL, "
+        "length INTEGER NOT NULL, "
+        "PRIMARY KEY (hash, seq));",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault "
+        "SELECT printf('%016x', hash), seq, embedding, offset, length "
+        "FROM _dbmem_vault_old;",
+        NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db, "DROP TABLE _dbmem_vault_old;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto rollback;
+
+    // --- dbmem_cache (may not exist in very old databases) ---
+    if (sqlite3_prepare_v2(db,
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dbmem_cache' LIMIT 1;",
+            -1, &vm, NULL) == SQLITE_OK) {
+        if (sqlite3_step(vm) == SQLITE_ROW) has_cache = true;
+        sqlite3_finalize(vm);
+        vm = NULL;
+    } else {
+        rc = sqlite3_errcode(db);
+        goto rollback;
+    }
+
+    if (has_cache) {
+        rc = dbmem_schema_object_list_load(db, "dbmem_cache", &cache_objects);
+        if (rc != SQLITE_OK) goto rollback;
+
+        rc = sqlite3_exec(db, "ALTER TABLE dbmem_cache RENAME TO _dbmem_cache_old;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+
+        rc = sqlite3_exec(db,
+            "CREATE TABLE dbmem_cache ("
+            "text_hash TEXT NOT NULL, "
+            "provider TEXT NOT NULL, "
+            "model TEXT NOT NULL, "
+            "embedding BLOB NOT NULL, "
+            "dimension INTEGER NOT NULL, "
+            "PRIMARY KEY (text_hash, provider, model));",
+            NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+
+        rc = sqlite3_exec(db,
+            "INSERT INTO dbmem_cache "
+            "SELECT printf('%016x', text_hash), provider, model, embedding, dimension "
+            "FROM _dbmem_cache_old;",
+            NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+
+        rc = sqlite3_exec(db, "DROP TABLE _dbmem_cache_old;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+    }
+
+    // --- dbmem_vault_fts (FTS5 virtual table — must drop+recreate) ---
+    if (sqlite3_prepare_v2(db,
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dbmem_vault_fts' LIMIT 1;",
+            -1, &vm, NULL) == SQLITE_OK) {
+        if (sqlite3_step(vm) == SQLITE_ROW) has_fts = true;
+        sqlite3_finalize(vm);
+        vm = NULL;
+    } else {
+        rc = sqlite3_errcode(db);
+        goto rollback;
+    }
+
+    if (has_fts) {
+        // P2: probe FTS5 availability BEFORE reading from the old virtual table.
+        // Accessing dbmem_vault_fts requires the FTS5 module; if the module is absent
+        // on this build we must not SELECT from the table.
+        if (!dbmem_fts5_available(db)) {
+            // Leave the old FTS table untouched so a later FTS-enabled build can
+            // repair its hashes in-place without losing the indexed content.
+        } else {
+            rc = dbmem_fts_migrate_hashes(db);
+            if (rc != SQLITE_OK) goto rollback;
+        }
+    }
+
+    if (sync_state.enabled) {
+        rc = sqlite3_exec(db, "DROP TABLE IF EXISTS dbmem_content_cloudsync_blocks;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+        rc = sqlite3_exec(db, "DROP TABLE IF EXISTS dbmem_content_cloudsync;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+
+        rc = dbmem_schema_object_list_apply(db, &sync_state.shadow_objects);
+        if (rc != SQLITE_OK) goto rollback;
+
+        rc = dbmem_schema_object_list_apply(db, &sync_state.triggers);
+        if (rc != SQLITE_OK) goto rollback;
+    }
+
+    rc = dbmem_schema_object_list_apply(db, &content_objects);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = dbmem_schema_object_list_apply(db, &vault_objects);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = dbmem_schema_object_list_apply(db, &cache_objects);
+    if (rc != SQLITE_OK) goto rollback;
+
+    rc = sqlite3_exec(db, "RELEASE SAVEPOINT dbmem_schema_migrate;", NULL, NULL, NULL);
+    if (rc == SQLITE_OK) in_savepoint = false;
+    goto cleanup;
+
+rollback:
+    if (in_savepoint) {
+        sqlite3_exec(db, "ROLLBACK TO SAVEPOINT dbmem_schema_migrate;", NULL, NULL, NULL);
+        sqlite3_exec(db, "RELEASE SAVEPOINT dbmem_schema_migrate;", NULL, NULL, NULL);
+        in_savepoint = false;
+    }
+
+cleanup:
+    if (altered_pragmas) {
+        char *sql = sqlite3_mprintf("PRAGMA legacy_alter_table=%d;", old_legacy_alter_table ? 1 : 0);
+        if (sql) {
+            sqlite3_exec(db, sql, NULL, NULL, NULL);
+            sqlite3_free(sql);
+        }
+        sql = sqlite3_mprintf("PRAGMA foreign_keys=%d;", old_foreign_keys ? 1 : 0);
+        if (sql) {
+            sqlite3_exec(db, sql, NULL, NULL, NULL);
+            sqlite3_free(sql);
+        }
+    }
+    if (vm) sqlite3_finalize(vm);
+    dbmem_cloudsync_state_reset(&sync_state);
+    dbmem_schema_object_list_reset(&content_objects);
+    dbmem_schema_object_list_reset(&vault_objects);
+    dbmem_schema_object_list_reset(&cache_objects);
+    return rc;
+}
+
 static int dbmem_database_init (sqlite3 *db) {
+    // Create settings table first (always safe, no migration needed for it)
     const char *sql = "CREATE TABLE IF NOT EXISTS dbmem_settings (key TEXT PRIMARY KEY, value TEXT);";
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
-    
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash INTEGER PRIMARY KEY NOT NULL, path TEXT NOT NULL DEFAULT '' UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL DEFAULT 0, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);";
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash INTEGER NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
-    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) return rc;
-    
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));";
+
+    // Migrate from pre-1.0.0 schema (INTEGER hash → TEXT hash) if needed
+    if (dbmem_schema_needs_migration(db)) {
+        rc = dbmem_schema_migrate(db);
+        if (rc != SQLITE_OK) return rc;
+    }
+
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL DEFAULT '' UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL DEFAULT 0, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    sql = "CREATE VIRTUAL TABLE IF NOT EXISTS dbmem_vault_fts USING fts5 (content, hash UNINDEXED, seq UNINDEXED, context UNINDEXED);";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash TEXT NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
-    if (rc != SQLITE_OK) {
-        fts5_is_available = false;
-        rc = SQLITE_OK;
+    if (rc != SQLITE_OK) return rc;
+
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));";
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    fts5_is_available = dbmem_fts5_available(db);
+    if (fts5_is_available) {
+        sql = "CREATE VIRTUAL TABLE IF NOT EXISTS dbmem_vault_fts USING fts5 (content, hash UNINDEXED, seq UNINDEXED, context UNINDEXED);";
+        rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+        if (rc != SQLITE_OK) {
+            fts5_is_available = false;
+            rc = SQLITE_OK;
+        } else if (dbmem_fts_table_needs_hash_migration(db)) {
+            rc = dbmem_fts_migrate_hashes(db);
+            if (rc != SQLITE_OK) return rc;
+        }
     }
-    
+
     // explicitly allows extension loading (only available when linked statically)
     // when loaded dynamically, the calling application must enable extension loading
     #if defined(SQLITE_CORE) && !defined(SQLITE_OMIT_LOAD_EXTENSION)
@@ -369,13 +849,16 @@ static int dbmem_database_init (sqlite3 *db) {
 
 static bool dbmem_database_check_if_stored (sqlite3 *db, uint64_t hash, int64_t len) {
     static const char *sql = "SELECT length FROM dbmem_content WHERE hash=? LIMIT 1;";
-    
+
+    char hash_hex[17];
+    dbmem_hash_to_hex(hash, hash_hex);
+
     bool result = false;
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
-    
-    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)hash);
+
+    rc = sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_step(vm);
@@ -391,21 +874,21 @@ cleanup:
     return result;
 }
 
-static void dbmem_database_delete_hash (sqlite3 *db, sqlite3_int64 hash) {
+static void dbmem_database_delete_hash (sqlite3 *db, const char *hash) {
     sqlite3_stmt *vm = NULL;
     if (fts5_is_available) {
         sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault_fts WHERE hash=?1;", -1, &vm, NULL);
-        sqlite3_bind_int64(vm, 1, hash);
+        sqlite3_bind_text(vm, 1, hash, -1, SQLITE_STATIC);
         sqlite3_step(vm);
         sqlite3_finalize(vm);
     }
     sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault WHERE hash=?1;", -1, &vm, NULL);
-    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_bind_text(vm, 1, hash, -1, SQLITE_STATIC);
     sqlite3_step(vm);
     sqlite3_finalize(vm);
 
     sqlite3_prepare_v2(db, "DELETE FROM dbmem_content WHERE hash=?1;", -1, &vm, NULL);
-    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_bind_text(vm, 1, hash, -1, SQLITE_STATIC);
     sqlite3_step(vm);
     sqlite3_finalize(vm);
 }
@@ -420,10 +903,19 @@ static void dbmem_database_delete_stale_path (sqlite3 *db, const char *path, uin
     sqlite3_bind_text(vm, 1, path, -1, SQLITE_STATIC);
     rc = sqlite3_step(vm);
     if (rc == SQLITE_ROW) {
-        sqlite3_int64 old_hash = sqlite3_column_int64(vm, 0);
+        const char *old_hash = (const char *)sqlite3_column_text(vm, 0);
+        char new_hash_hex[17];
+        dbmem_hash_to_hex(new_hash, new_hash_hex);
+        bool stale = (old_hash && strcmp(old_hash, new_hash_hex) != 0);
+        // copy before finalizing so the pointer remains valid
+        char old_hash_copy[17];
+        if (stale && old_hash) {
+            strncpy(old_hash_copy, old_hash, sizeof(old_hash_copy));
+            old_hash_copy[16] = '\0';
+        }
         sqlite3_finalize(vm);
-        if ((uint64_t)old_hash != new_hash) {
-            dbmem_database_delete_hash(db, old_hash);
+        if (stale) {
+            dbmem_database_delete_hash(db, old_hash_copy);
         }
     } else {
         sqlite3_finalize(vm);
@@ -433,11 +925,14 @@ static void dbmem_database_delete_stale_path (sqlite3 *db, const char *path, uin
 static int dbmem_database_add_entry (dbmem_context *ctx, sqlite3 *db, uint64_t hash, const char *buffer, int64_t len) {
     static const char *sql = "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
 
+    char hash_hex[17];
+    dbmem_hash_to_hex(hash, hash_hex);
+
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)hash);
+    rc = sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
 
     const char *path = ctx->path;
@@ -470,12 +965,15 @@ cleanup:
 
 static int dbmem_database_add_chunk (dbmem_context *ctx, embedding_result_t *result, size_t offset, size_t length, size_t index) {
     static const char *sql = "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES (?1, ?2, ?3, ?4, ?5);";
-    
+
+    char hash_hex[17];
+    dbmem_hash_to_hex(ctx->hash, hash_hex);
+
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
-    
-    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)ctx->hash);
+
+    rc = sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_bind_int64(vm, 2, (sqlite3_int64)index);
@@ -501,15 +999,18 @@ cleanup:
 
 static int dbmem_database_add_fts5 (dbmem_context *ctx, const char *text, size_t text_len, size_t index) {
     static const char *sql = "INSERT INTO dbmem_vault_fts (content, hash, seq, context) VALUES (?1, ?2, ?3, ?4);";
-    
+
+    char hash_hex[17];
+    dbmem_hash_to_hex(ctx->hash, hash_hex);
+
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
-    
+
     rc = sqlite3_bind_text(vm, 1, text, (int)text_len, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
-    
-    rc = sqlite3_bind_int64(vm, 2, (sqlite3_int64)ctx->hash);
+
+    rc = sqlite3_bind_text(vm, 2, hash_hex, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_bind_int64(vm, 3, (sqlite3_int64)index);
@@ -720,12 +1221,12 @@ void dbmem_context_set_errorf (dbmem_context *ctx, const char *fmt, ...) {
 static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     UNUSED_PARAM(argc);
 
-    if (sqlite3_value_type(argv[0]) != SQLITE_INTEGER) {
-        sqlite3_result_error(context, "The function memory_delete expects one argument of type INTEGER (hash)", SQLITE_ERROR);
+    if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
+        sqlite3_result_error(context, "The function memory_delete expects one argument of type TEXT (hash)", SQLITE_ERROR);
         return;
     }
 
-    sqlite3_int64 hash = sqlite3_value_int64(argv[0]);
+    const char *hash = (const char *)sqlite3_value_text(argv[0]);
     sqlite3 *db = sqlite3_context_db_handle(context);
 
     int rc = dbmem_database_begin_transaction(db);
@@ -739,7 +1240,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
         sqlite3_stmt *vm = NULL;
         rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault_fts WHERE hash = ?1;", -1, &vm, NULL);
         if (rc == SQLITE_OK) {
-            sqlite3_bind_int64(vm, 1, hash);
+            sqlite3_bind_text(vm, 1, hash, -1, SQLITE_STATIC);
             sqlite3_step(vm);
             sqlite3_finalize(vm);
         }
@@ -749,7 +1250,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
     sqlite3_stmt *vm = NULL;
     rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault WHERE hash = ?1;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto rollback;
-    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_bind_text(vm, 1, hash, -1, SQLITE_STATIC);
     rc = sqlite3_step(vm);
     sqlite3_finalize(vm);
     if (rc != SQLITE_DONE) goto rollback;
@@ -757,7 +1258,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
     // Delete from content
     rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_content WHERE hash = ?1;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto rollback;
-    sqlite3_bind_int64(vm, 1, hash);
+    sqlite3_bind_text(vm, 1, hash, -1, SQLITE_STATIC);
     rc = sqlite3_step(vm);
     sqlite3_finalize(vm);
     if (rc != SQLITE_DONE) goto rollback;
@@ -1137,12 +1638,15 @@ static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embeddin
 
     if (!ctx->provider || !ctx->model) return false;
 
+    char hash_hex[17];
+    dbmem_hash_to_hex(text_hash, hash_hex);
+
     bool found = false;
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    sqlite3_bind_int64(vm, 1, (sqlite3_int64)text_hash);
+    sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 2, ctx->provider, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
 
@@ -1207,11 +1711,14 @@ static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const emb
 
     if (!ctx->provider || !ctx->model) return;
 
+    char hash_hex[17];
+    dbmem_hash_to_hex(text_hash, hash_hex);
+
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    sqlite3_bind_int64(vm, 1, (sqlite3_int64)text_hash);
+    sqlite3_bind_text(vm, 1, hash_hex, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 2, ctx->provider, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
     sqlite3_bind_blob(vm, 4, result->embedding, result->n_embd * (int)sizeof(float), SQLITE_STATIC);
@@ -1498,7 +2005,7 @@ static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_pa
     for (int i = 0; i < nrow; i++) {
         const char *path = table[ncol + i * ncol + 1];
         if (dbmem_file_exists(path)) continue;
-        sqlite3_int64 hash = strtoll(table[ncol + i * ncol], NULL, 10);
+        const char *hash = table[ncol + i * ncol];
         dbmem_database_delete_hash(db, hash);
     }
     dbmem_database_commit_transaction(db);
@@ -1602,9 +2109,11 @@ static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value
         if (rc == SQLITE_OK && path) {
             static const char *fix_sql =
                 "UPDATE dbmem_content SET hash = ?1 WHERE path = ?2 AND hash != ?1;";
+            char fix_hash_hex[17];
+            dbmem_hash_to_hex(ctx->hash, fix_hash_hex);
             sqlite3_stmt *fix_vm = NULL;
             if (sqlite3_prepare_v2(db, fix_sql, -1, &fix_vm, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(fix_vm, 1, (sqlite3_int64)ctx->hash);
+                sqlite3_bind_text(fix_vm, 1, fix_hash_hex, -1, SQLITE_STATIC);
                 sqlite3_bind_text(fix_vm, 2, path, -1, SQLITE_STATIC);
                 sqlite3_step(fix_vm);
                 sqlite3_finalize(fix_vm);
