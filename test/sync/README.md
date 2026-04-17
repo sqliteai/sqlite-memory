@@ -62,7 +62,7 @@ The sync layer routes changes through a [SQLiteCloud](https://sqlitecloud.io/) m
 3. **Create the memory table** — connect to your database and run:
    ```sql
    CREATE TABLE IF NOT EXISTS dbmem_content (
-       hash          INTEGER PRIMARY KEY NOT NULL,
+       hash          TEXT    PRIMARY KEY NOT NULL,
        path          TEXT    NOT NULL DEFAULT '' UNIQUE,
        value         TEXT    DEFAULT NULL,
        length        INTEGER NOT NULL DEFAULT 0,
