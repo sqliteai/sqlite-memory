@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <float.h>
 #include <limits.h>
+#include <stddef.h>
 #include <time.h>
 
 #ifndef SQLITE_CORE
@@ -92,9 +93,15 @@ static bool dbmem_search_column_hash (sqlite3_stmt *vm, int column, uint64_t *ha
 
 // MARK: - UTILS -
 
+static void vMemorySearchCursorReset (vMemorySearchCursor *c) {
+    if (c->buffer) dbmemory_free(c->buffer);
+    memset((char *)c + offsetof(vMemorySearchCursor, max_results), 0,
+           sizeof(*c) - offsetof(vMemorySearchCursor, max_results));
+}
+
 int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perform_fts) {
     if (entries <= 0) {
-        memset(c, 0, sizeof(*c));
+        vMemorySearchCursorReset(c);
         c->max_results = entries;
         c->perform_fts = perform_fts;
         return SQLITE_OK;
@@ -527,7 +534,7 @@ static int vMemorySearchCursorOpen (sqlite3_vtab *pVtab, sqlite3_vtab_cursor **p
 
 static int vMemorySearchCursorClose (sqlite3_vtab_cursor *cur){
     vMemorySearchCursor *c = (vMemorySearchCursor *)cur;
-    if (c->buffer) dbmemory_free(c->buffer);
+    vMemorySearchCursorReset(c);
     dbmemory_free(c);
     return SQLITE_OK;
 }
@@ -638,6 +645,7 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
         fetch_count = max_results;
     }
 
+    vMemorySearchCursorReset(c);
     if (fetch_count <= 0) {
         c->count = 0;
         return SQLITE_OK;

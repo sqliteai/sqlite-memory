@@ -26,6 +26,7 @@ static size_t cacert_len = sizeof(cacert_pem) - 1;
 
 #ifndef DBMEM_OMIT_CURL
 static size_t dbmem_remote_receive_data(void *contents, size_t size, size_t nmemb, void *xdata);
+static struct curl_slist *dbmem_remote_build_headers (const char *api_key);
 #endif
 
 struct dbmem_remote_engine_t {
@@ -66,6 +67,27 @@ struct dbmem_remote_engine_t {
 
 #include <stdbool.h>
 #include <stddef.h>
+
+#ifndef DBMEM_OMIT_CURL
+static struct curl_slist *dbmem_remote_build_headers (const char *api_key) {
+    char auth_header[512];
+    struct curl_slist *headers = NULL;
+    struct curl_slist *next = NULL;
+
+    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
+    headers = curl_slist_append(headers, auth_header);
+    if (!headers) return NULL;
+
+    next = curl_slist_append(headers, "Content-Type: application/json");
+    if (!next) {
+        curl_slist_free_all(headers);
+        return NULL;
+    }
+    headers = next;
+
+    return headers;
+}
+#endif
 
 static bool text_needs_json_escape (const char *text, size_t *len) {
     size_t original_len = *len;
@@ -263,11 +285,7 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
     #endif
 
     // set up headers
-    char auth_header[512];
-    snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", api_key);
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, auth_header);
-    if (headers) headers = curl_slist_append(headers, "Content-Type: application/json");
+    struct curl_slist *headers = dbmem_remote_build_headers(api_key);
     if (!headers) {
         snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Failed to allocate HTTP headers");
         curl_easy_cleanup(curl);
@@ -520,6 +538,36 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     engine->total_embeddings_generated++;
 
     return 0;
+}
+
+int dbmem_remote_engine_set_apikey (dbmem_remote_engine_t *engine, const char *api_key, char err_msg[DBMEM_ERRBUF_SIZE]) {
+    if (!engine || !api_key) {
+        if (err_msg) snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Invalid remote engine or API key");
+        return SQLITE_MISUSE;
+    }
+
+#ifndef DBMEM_OMIT_CURL
+    struct curl_slist *headers = dbmem_remote_build_headers(api_key);
+    if (!headers) {
+        if (err_msg) snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Failed to allocate HTTP headers");
+        return SQLITE_NOMEM;
+    }
+
+    curl_easy_setopt(engine->curl, CURLOPT_HTTPHEADER, headers);
+    if (engine->headers) curl_slist_free_all(engine->headers);
+    engine->headers = headers;
+#else
+    char *copy = dbmem_strdup(api_key);
+    if (!copy) {
+        if (err_msg) snprintf(err_msg, DBMEM_ERRBUF_SIZE, "Unable to duplicate API key (insufficient memory)");
+        return SQLITE_NOMEM;
+    }
+
+    if (engine->api_key) dbmemory_free(engine->api_key);
+    engine->api_key = copy;
+#endif
+
+    return SQLITE_OK;
 }
 
 void dbmem_remote_engine_free (dbmem_remote_engine_t *engine) {

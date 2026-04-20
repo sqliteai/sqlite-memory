@@ -1070,7 +1070,16 @@ static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value 
     
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
-    
+
+    if (ctx->r_engine && !ctx->is_local && !ctx->is_custom) {
+        int rc = dbmem_remote_engine_set_apikey(ctx->r_engine, apikey, ctx->error_msg);
+        if (rc != SQLITE_OK) {
+            dbmemory_free(apikey);
+            sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : "Unable to update remote API key", -1);
+            return;
+        }
+    }
+
     if (ctx->api_key) dbmemory_free(ctx->api_key);
     ctx->api_key = apikey;
     
@@ -1649,7 +1658,15 @@ static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value
         if (rc != SQLITE_OK) break;
 
         int step = sqlite3_step(vm);
-        if (step != SQLITE_ROW) { sqlite3_finalize(vm); break; }
+        if (step == SQLITE_DONE) {
+            sqlite3_finalize(vm);
+            break;
+        }
+        if (step != SQLITE_ROW) {
+            sqlite3_finalize(vm);
+            rc = step;
+            break;
+        }
 
         // Copy row data before finalizing so we can write in the next step
         const char *path_raw = (const char *)sqlite3_column_text(vm, 0);
