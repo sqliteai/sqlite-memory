@@ -11,7 +11,7 @@
 //  each agent never directly indexed.
 //
 //  Required environment variables:
-//    APIKEY        — vectors.space API key for embeddings
+//    APIKEY        — vectors.space API key for remote embeddings
 //    VECTOR_LIB    — path to sqlite-vector shared library
 //    SYNC_LIB      — path to sqlite-sync (cloudsync) shared library
 //    SYNC_DB_ID    — SQLiteCloud managed database ID (shared by both agents)
@@ -217,12 +217,40 @@ static int count_search_results(sqlite3 *db, const char *query, const char *cont
 
 static sqlite3 *db_a = NULL;
 static sqlite3 *db_b = NULL;
-static const char *g_apikey       = NULL;
+static const char *g_api_key     = NULL;
 static const char *g_vector_lib   = NULL;
 static const char *g_sync_lib     = NULL;
 static const char *g_sync_db_id   = NULL;
 static const char *g_sync_apikey_a = NULL;
 static const char *g_sync_apikey_b = NULL;
+
+static void step_context_filtered_fts(void) {
+    printf("  Agent A context-filtered FTS search works... ");
+    fflush(stdout);
+    ASSERT_SQL_OK(db_a, "SELECT memory_set_option('vector_weight', 0.0);");
+    ASSERT_SQL_OK(db_a, "SELECT memory_set_option('text_weight', 1.0);");
+    ASSERT_SQL_OK(db_a, "SELECT memory_set_option('min_score', 0.0);");
+    int n = count_search_results(db_a, "James Webb Telescope", CONTEXT_SPACE);
+    ASSERT(n >= 1);
+    ASSERT_SQL_OK(db_a, "SELECT memory_set_option('vector_weight', 0.6);");
+    ASSERT_SQL_OK(db_a, "SELECT memory_set_option('text_weight', 0.4);");
+    ASSERT_SQL_OK(db_a, "SELECT memory_set_option('min_score', 0.7);");
+    tests_run++; tests_passed++;
+    printf("PASSED (%d result(s))\n", n);
+
+    printf("  Agent B context-filtered FTS search works... ");
+    fflush(stdout);
+    ASSERT_SQL_OK(db_b, "SELECT memory_set_option('vector_weight', 0.0);");
+    ASSERT_SQL_OK(db_b, "SELECT memory_set_option('text_weight', 1.0);");
+    ASSERT_SQL_OK(db_b, "SELECT memory_set_option('min_score', 0.0);");
+    n = count_search_results(db_b, "Great Barrier Reef", CONTEXT_REEF);
+    ASSERT(n >= 1);
+    ASSERT_SQL_OK(db_b, "SELECT memory_set_option('vector_weight', 0.6);");
+    ASSERT_SQL_OK(db_b, "SELECT memory_set_option('text_weight', 0.4);");
+    ASSERT_SQL_OK(db_b, "SELECT memory_set_option('min_score', 0.7);");
+    tests_run++; tests_passed++;
+    printf("PASSED (%d result(s))\n", n);
+}
 
 // Step 1: Open both agent databases
 static void step_open_databases(void) {
@@ -245,8 +273,8 @@ static void step_open_databases(void) {
 static void step_configure_agents(void) {
     printf("  Configuring Agent A (space context)... ");
     fflush(stdout);
-    char sql[512];
-    snprintf(sql, sizeof(sql), "SELECT memory_set_apikey('%s');", g_apikey);
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "SELECT memory_set_apikey('%s');", g_api_key);
     ASSERT_SQL_OK(db_a, sql);
     ASSERT_SQL_OK(db_a, "SELECT memory_set_model('llama', 'embeddinggemma-300m');");
     tests_run++; tests_passed++;
@@ -254,7 +282,7 @@ static void step_configure_agents(void) {
 
     printf("  Configuring Agent B (reef context)... ");
     fflush(stdout);
-    snprintf(sql, sizeof(sql), "SELECT memory_set_apikey('%s');", g_apikey);
+    snprintf(sql, sizeof(sql), "SELECT memory_set_apikey('%s');", g_api_key);
     ASSERT_SQL_OK(db_b, sql);
     ASSERT_SQL_OK(db_b, "SELECT memory_set_model('llama', 'embeddinggemma-300m');");
     tests_run++; tests_passed++;
@@ -479,14 +507,14 @@ static void step_postsync_search(void) {
 // ============================================================================
 
 int main(void) {
-    g_apikey       = getenv("APIKEY");
+    g_api_key      = getenv("APIKEY");
     g_vector_lib   = getenv("VECTOR_LIB");
     g_sync_lib     = getenv("SYNC_LIB");
     g_sync_db_id   = getenv("SYNC_DB_ID");
     g_sync_apikey_a = getenv("SYNC_APIKEY_A");
     g_sync_apikey_b = getenv("SYNC_APIKEY_B");
 
-    if (!g_apikey || strlen(g_apikey) == 0 ||
+    if (!g_api_key || strlen(g_api_key) == 0 ||
         !g_vector_lib || strlen(g_vector_lib) == 0 ||
         !g_sync_lib || strlen(g_sync_lib) == 0 ||
         !g_sync_db_id || !g_sync_apikey_a || !g_sync_apikey_b) {
@@ -519,6 +547,7 @@ int main(void) {
     step_ingest_content();
 
     printf("\nPhase 4: Pre-sync search (isolated knowledge)\n");
+    step_context_filtered_fts();
     step_presync_search();
 
     printf("\nPhase 5: Connect both agents to cloud\n");

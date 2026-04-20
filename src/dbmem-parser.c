@@ -28,6 +28,7 @@
 typedef struct {
     size_t  start;              // Byte offset in source buffer
     size_t  end;                // Byte end in source buffer
+    int     is_heading;         // True if this section starts with a heading block
     char   *text;               // Stripped plain text (allocated)
     size_t  text_len;           // Length of stripped text
 } section_t;
@@ -113,8 +114,6 @@ static size_t find_split (const char *text, size_t len, size_t max_chars) {
 
 // Push a section to dynamic array
 static int section_push (parse_ctx_t *ctx, size_t start, size_t end, int is_heading) {
-    UNUSED_PARAM(is_heading);
-    
     if (ctx->sec_count >= ctx->sec_cap) {
         size_t new_cap = ctx->sec_cap ? ctx->sec_cap * 2 : 16;
         section_t *tmp = (section_t *)dbmemory_realloc(ctx->sections, new_cap * sizeof(section_t));
@@ -126,6 +125,7 @@ static int section_push (parse_ctx_t *ctx, size_t start, size_t end, int is_head
     section_t *s = &ctx->sections[ctx->sec_count++];
     s->start = start;
     s->end = end;
+    s->is_heading = is_heading;
     s->text = NULL;
     s->text_len = 0;
     
@@ -607,7 +607,7 @@ static int parse_sections (const char *buffer, size_t buffer_size, bool skip_sem
     for (size_t i = 0; i < ctx->sec_count; i++) {
         section_t *s = &ctx->sections[i];
         // First section or heading starts new section
-        if (write_idx == 0) {
+        if (write_idx == 0 || s->is_heading) {
             ctx->sections[write_idx++] = *s;
         } else {
             // Extend previous section to include this one

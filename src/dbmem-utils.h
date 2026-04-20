@@ -33,6 +33,8 @@
 
 #define DBMEM_ERRBUF_SIZE                   1024
 #define DBMEM_UUID_STR_MAXLEN               37
+#define DBMEM_HASH_HEX_LEN                  16
+#define DBMEM_HASH_STR_MAXLEN               (DBMEM_HASH_HEX_LEN + 1)
 
 // MEMORY
 void     *dbmemory_alloc (uint64_t size);
@@ -52,6 +54,8 @@ bool   dbmem_file_has_extension (const char *path, const char *extensions);
 
 // GENERAL
 uint64_t  dbmem_hash_compute (const void *data, size_t len);
+char     *dbmem_hash_to_hex (uint64_t hash, char value[DBMEM_HASH_STR_MAXLEN]);
+bool      dbmem_hash_from_hex (const char *text, uint64_t *value);
 char     *dbmem_uuid_v7 (char value[DBMEM_UUID_STR_MAXLEN]);
 
 #endif

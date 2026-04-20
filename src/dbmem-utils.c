@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <time.h>
 #include <sys/stat.h>
 
@@ -135,6 +136,29 @@ uint64_t dbmem_hash_compute (const void *data, size_t len) {
   }
 
   return mix64(h);
+}
+
+char *dbmem_hash_to_hex (uint64_t hash, char value[DBMEM_HASH_STR_MAXLEN]) {
+    snprintf(value, DBMEM_HASH_STR_MAXLEN, "%016llx", (unsigned long long)hash);
+    return value;
+}
+
+bool dbmem_hash_from_hex (const char *text, uint64_t *value) {
+    if (!text || !value) return false;
+    if (strlen(text) != DBMEM_HASH_HEX_LEN) return false;
+
+    uint64_t result = 0;
+    for (int i = 0; i < DBMEM_HASH_HEX_LEN; i++) {
+        char c = text[i];
+        if (!isxdigit((unsigned char)c)) return false;
+
+        result <<= 4;
+        if (c >= '0' && c <= '9') result |= (uint64_t)(c - '0');
+        else result |= (uint64_t)(10 + (tolower((unsigned char)c) - 'a'));
+    }
+
+    *value = result;
+    return true;
 }
 
 // MARK: - UUIDv7 -

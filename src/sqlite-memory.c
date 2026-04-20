@@ -134,6 +134,31 @@ struct dbmem_context {
 
 static bool fts5_is_available = true;
 
+static int dbmem_bind_hash (sqlite3_stmt *vm, int index, uint64_t hash) {
+    char hash_text[DBMEM_HASH_STR_MAXLEN];
+    dbmem_hash_to_hex(hash, hash_text);
+    return sqlite3_bind_text(vm, index, hash_text, -1, SQLITE_TRANSIENT);
+}
+
+static bool dbmem_column_hash (sqlite3_stmt *vm, int column, uint64_t *hash) {
+    const char *hash_text = (const char *)sqlite3_column_text(vm, column);
+    return dbmem_hash_from_hex(hash_text, hash);
+}
+
+static bool dbmem_value_hash (sqlite3_value *value, uint64_t *hash) {
+    if (!value || !hash) return false;
+
+    switch (sqlite3_value_type(value)) {
+        case SQLITE_TEXT:
+            return dbmem_hash_from_hex((const char *)sqlite3_value_text(value), hash);
+        case SQLITE_INTEGER:
+            *hash = (uint64_t)sqlite3_value_int64(value);
+            return true;
+        default:
+            return false;
+    }
+}
+
 // MARK: - Settings -
 
 static int dbmem_settings_write (sqlite3 *db, const char *key, const char *text_value, sqlite3_int64 int_value, const sqlite3_value *sql_value, int bind_type) {
@@ -233,25 +258,25 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_MAX_RESULTS) == 0) {
         int n = sqlite3_value_int(value);
-        if (n > 0) ctx->max_results = n;
+        if (n >= 0) ctx->max_results = n;
         return 0;
     }
     
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_VECTOR_WEIGHT) == 0) {
         double n = sqlite3_value_double(value);
-        if (n > 0) ctx->vector_weight = n;
+        if (n >= 0) ctx->vector_weight = n;
         return 0;
     }
 
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_TEXT_WEIGHT) == 0) {
         double n = sqlite3_value_double(value);
-        if (n > 0) ctx->text_weight = n;
+        if (n >= 0) ctx->text_weight = n;
         return 0;
     }
     
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_MIN_SCORE) == 0) {
         double n = sqlite3_value_double(value);
-        if (n > 0) ctx->min_score = n;
+        if (n >= 0) ctx->min_score = n;
         return 0;
     }
 
@@ -338,15 +363,15 @@ static int dbmem_database_init (sqlite3 *db) {
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash INTEGER PRIMARY KEY NOT NULL, path TEXT NOT NULL DEFAULT '' UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL DEFAULT 0, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_content (hash TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL DEFAULT '' UNIQUE, value TEXT DEFAULT NULL, length INTEGER NOT NULL DEFAULT 0, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash INTEGER NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash TEXT NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
@@ -375,7 +400,7 @@ static bool dbmem_database_check_if_stored (sqlite3 *db, uint64_t hash, int64_t 
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
     
-    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)hash);
+    rc = dbmem_bind_hash(vm, 1, hash);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_step(vm);
@@ -391,21 +416,21 @@ cleanup:
     return result;
 }
 
-static void dbmem_database_delete_hash (sqlite3 *db, sqlite3_int64 hash) {
+static void dbmem_database_delete_hash (sqlite3 *db, uint64_t hash) {
     sqlite3_stmt *vm = NULL;
     if (fts5_is_available) {
         sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault_fts WHERE hash=?1;", -1, &vm, NULL);
-        sqlite3_bind_int64(vm, 1, hash);
+        dbmem_bind_hash(vm, 1, hash);
         sqlite3_step(vm);
         sqlite3_finalize(vm);
     }
     sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault WHERE hash=?1;", -1, &vm, NULL);
-    sqlite3_bind_int64(vm, 1, hash);
+    dbmem_bind_hash(vm, 1, hash);
     sqlite3_step(vm);
     sqlite3_finalize(vm);
 
     sqlite3_prepare_v2(db, "DELETE FROM dbmem_content WHERE hash=?1;", -1, &vm, NULL);
-    sqlite3_bind_int64(vm, 1, hash);
+    dbmem_bind_hash(vm, 1, hash);
     sqlite3_step(vm);
     sqlite3_finalize(vm);
 }
@@ -420,9 +445,10 @@ static void dbmem_database_delete_stale_path (sqlite3 *db, const char *path, uin
     sqlite3_bind_text(vm, 1, path, -1, SQLITE_STATIC);
     rc = sqlite3_step(vm);
     if (rc == SQLITE_ROW) {
-        sqlite3_int64 old_hash = sqlite3_column_int64(vm, 0);
+        uint64_t old_hash = 0;
+        bool has_old_hash = dbmem_column_hash(vm, 0, &old_hash);
         sqlite3_finalize(vm);
-        if ((uint64_t)old_hash != new_hash) {
+        if (has_old_hash && old_hash != new_hash) {
             dbmem_database_delete_hash(db, old_hash);
         }
     } else {
@@ -437,7 +463,7 @@ static int dbmem_database_add_entry (dbmem_context *ctx, sqlite3 *db, uint64_t h
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)hash);
+    rc = dbmem_bind_hash(vm, 1, hash);
     if (rc != SQLITE_OK) goto cleanup;
 
     const char *path = ctx->path;
@@ -475,7 +501,7 @@ static int dbmem_database_add_chunk (dbmem_context *ctx, embedding_result_t *res
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
     
-    rc = sqlite3_bind_int64(vm, 1, (sqlite3_int64)ctx->hash);
+    rc = dbmem_bind_hash(vm, 1, ctx->hash);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_bind_int64(vm, 2, (sqlite3_int64)index);
@@ -509,7 +535,7 @@ static int dbmem_database_add_fts5 (dbmem_context *ctx, const char *text, size_t
     rc = sqlite3_bind_text(vm, 1, text, (int)text_len, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
     
-    rc = sqlite3_bind_int64(vm, 2, (sqlite3_int64)ctx->hash);
+    rc = dbmem_bind_hash(vm, 2, ctx->hash);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_bind_int64(vm, 3, (sqlite3_int64)index);
@@ -720,12 +746,11 @@ void dbmem_context_set_errorf (dbmem_context *ctx, const char *fmt, ...) {
 static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **argv) {
     UNUSED_PARAM(argc);
 
-    if (sqlite3_value_type(argv[0]) != SQLITE_INTEGER) {
-        sqlite3_result_error(context, "The function memory_delete expects one argument of type INTEGER (hash)", SQLITE_ERROR);
+    uint64_t hash = 0;
+    if (!dbmem_value_hash(argv[0], &hash)) {
+        sqlite3_result_error(context, "The function memory_delete expects one argument of type TEXT (hash)", SQLITE_ERROR);
         return;
     }
-
-    sqlite3_int64 hash = sqlite3_value_int64(argv[0]);
     sqlite3 *db = sqlite3_context_db_handle(context);
 
     int rc = dbmem_database_begin_transaction(db);
@@ -739,7 +764,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
         sqlite3_stmt *vm = NULL;
         rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault_fts WHERE hash = ?1;", -1, &vm, NULL);
         if (rc == SQLITE_OK) {
-            sqlite3_bind_int64(vm, 1, hash);
+            dbmem_bind_hash(vm, 1, hash);
             sqlite3_step(vm);
             sqlite3_finalize(vm);
         }
@@ -749,7 +774,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
     sqlite3_stmt *vm = NULL;
     rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_vault WHERE hash = ?1;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto rollback;
-    sqlite3_bind_int64(vm, 1, hash);
+    dbmem_bind_hash(vm, 1, hash);
     rc = sqlite3_step(vm);
     sqlite3_finalize(vm);
     if (rc != SQLITE_DONE) goto rollback;
@@ -757,7 +782,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
     // Delete from content
     rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_content WHERE hash = ?1;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto rollback;
-    sqlite3_bind_int64(vm, 1, hash);
+    dbmem_bind_hash(vm, 1, hash);
     rc = sqlite3_step(vm);
     sqlite3_finalize(vm);
     if (rc != SQLITE_DONE) goto rollback;
@@ -1142,7 +1167,7 @@ static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embeddin
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    sqlite3_bind_int64(vm, 1, (sqlite3_int64)text_hash);
+    dbmem_bind_hash(vm, 1, text_hash);
     sqlite3_bind_text(vm, 2, ctx->provider, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
 
@@ -1211,7 +1236,7 @@ static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const emb
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    sqlite3_bind_int64(vm, 1, (sqlite3_int64)text_hash);
+    dbmem_bind_hash(vm, 1, text_hash);
     sqlite3_bind_text(vm, 2, ctx->provider, -1, SQLITE_STATIC);
     sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
     sqlite3_bind_blob(vm, 4, result->embedding, result->n_embd * (int)sizeof(float), SQLITE_STATIC);
@@ -1376,17 +1401,30 @@ static int dbmem_process_file (dbmem_context *ctx, const char *path) {
 static int dbmem_reindex (dbmem_context *ctx) {
     sqlite3 *db = ctx->db;
     int rc = SQLITE_OK;
+    sqlite3_stmt *vm = NULL;
+    int saved_dimension = ctx->dimension;
+    bool saved_dimension_saved = ctx->dimension_saved;
+    bool saved_vector_extension_available = ctx->vector_extension_available;
+    bool reindex_started = false;
 
     // copy all content to a temp table
+    sqlite3_exec(db, "DROP TABLE IF EXISTS dbmem_reindex;", NULL, NULL, NULL);
     rc = sqlite3_exec(db, "CREATE TEMP TABLE dbmem_reindex AS SELECT path, value, context FROM dbmem_content;", NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
+    rc = sqlite3_exec(db, "SAVEPOINT dbmem_reindex;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    reindex_started = true;
+
     // clear all indexed data
     if (fts5_is_available) {
-        sqlite3_exec(db, "DELETE FROM dbmem_vault_fts;", NULL, NULL, NULL);
+        rc = sqlite3_exec(db, "DELETE FROM dbmem_vault_fts;", NULL, NULL, NULL);
+        if (rc != SQLITE_OK) goto cleanup;
     }
-    sqlite3_exec(db, "DELETE FROM dbmem_vault;", NULL, NULL, NULL);
-    sqlite3_exec(db, "DELETE FROM dbmem_content;", NULL, NULL, NULL);
+    rc = sqlite3_exec(db, "DELETE FROM dbmem_vault;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_exec(db, "DELETE FROM dbmem_content;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
 
     // reset dimension so the new model's dimension is auto-detected
     ctx->dimension = 0;
@@ -1394,11 +1432,10 @@ static int dbmem_reindex (dbmem_context *ctx) {
     ctx->vector_extension_available = false;
 
     // iterate temp table one row at a time
-    sqlite3_stmt *vm = NULL;
     rc = sqlite3_prepare_v2(db, "SELECT path, value, context FROM dbmem_reindex;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    while (sqlite3_step(vm) == SQLITE_ROW) {
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
         const char *path = (const char *)sqlite3_column_text(vm, 0);
         const char *value = (const char *)sqlite3_column_text(vm, 1);
         int value_len = sqlite3_column_bytes(vm, 1);
@@ -1408,18 +1445,34 @@ static int dbmem_reindex (dbmem_context *ctx) {
         ctx->context = context;
 
         if (path && dbmem_file_exists(path)) {
-            dbmem_process_file(ctx, path);
+            rc = dbmem_process_file(ctx, path);
         } else if (value && value_len > 0) {
             ctx->path = path;
-            dbmem_process_buffer(ctx, value, value_len);
+            rc = dbmem_process_buffer(ctx, value, value_len);
+        } else {
+            rc = SQLITE_OK;
         }
-        // else: skip entries that can't be rebuilt
+        if (rc != SQLITE_OK) goto cleanup;
     }
 
-    rc = SQLITE_OK;
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+
+    if (rc == SQLITE_OK && reindex_started) {
+        rc = sqlite3_exec(db, "RELEASE dbmem_reindex;", NULL, NULL, NULL);
+        reindex_started = false;
+    }
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
+    if (rc != SQLITE_OK) {
+        if (reindex_started) {
+            sqlite3_exec(db, "ROLLBACK TO dbmem_reindex; RELEASE dbmem_reindex;", NULL, NULL, NULL);
+        }
+        ctx->dimension = saved_dimension;
+        ctx->dimension_saved = saved_dimension_saved;
+        ctx->vector_extension_available = saved_vector_extension_available;
+    }
+    dbmem_context_reset_temp_values(ctx);
     sqlite3_exec(db, "DROP TABLE IF EXISTS dbmem_reindex;", NULL, NULL, NULL);
     return rc;
 }
@@ -1481,28 +1534,55 @@ static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **
     (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
 
-static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_path) {
-    char *sql = sqlite3_mprintf("SELECT hash, path FROM dbmem_content WHERE path LIKE '%q%%';", dir_path);
-    if (!sql) return;
+static bool dbmem_path_is_under_directory (const char *path, const char *dir_path) {
+    if (!path || !dir_path) return false;
 
-    char **table = NULL;
-    int nrow = 0, ncol = 0;
-    int rc = sqlite3_get_table(db, sql, &table, &nrow, &ncol, NULL);
-    sqlite3_free(sql);
-    if (rc != SQLITE_OK || nrow == 0) {
-        if (table) sqlite3_free_table(table);
+    size_t dir_len = strlen(dir_path);
+    if (dir_len == 0) return false;
+
+    while (dir_len > 1 && (dir_path[dir_len - 1] == '/' || dir_path[dir_len - 1] == '\\')) {
+        dir_len--;
+    }
+
+    if (dir_len == 1 && (dir_path[0] == '/' || dir_path[0] == '\\')) {
+        return path[0] == dir_path[0];
+    }
+
+    if (strncmp(path, dir_path, dir_len) != 0) return false;
+    if (path[dir_len] == '\0') return true;
+
+    return (path[dir_len] == '/' || path[dir_len] == '\\');
+}
+
+static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_path) {
+    static const char *sql = "SELECT hash, path FROM dbmem_content WHERE path IS NOT NULL AND path != '';";
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) return;
+
+    rc = dbmem_database_begin_transaction(db);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(vm);
         return;
     }
 
-    dbmem_database_begin_transaction(db);
-    for (int i = 0; i < nrow; i++) {
-        const char *path = table[ncol + i * ncol + 1];
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        uint64_t hash = 0;
+        const char *hash_text = (const char *)sqlite3_column_text(vm, 0);
+        const char *path = (const char *)sqlite3_column_text(vm, 1);
+        if (!dbmem_path_is_under_directory(path, dir_path)) continue;
         if (dbmem_file_exists(path)) continue;
-        sqlite3_int64 hash = strtoll(table[ncol + i * ncol], NULL, 10);
+        if (!dbmem_hash_from_hex(hash_text, &hash)) continue;
         dbmem_database_delete_hash(db, hash);
     }
-    dbmem_database_commit_transaction(db);
-    sqlite3_free_table(table);
+
+    sqlite3_finalize(vm);
+
+    if (rc == SQLITE_DONE || rc == SQLITE_OK) {
+        dbmem_database_commit_transaction(db);
+    } else {
+        dbmem_database_rollback_transaction(db);
+    }
 }
 
 static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -1604,7 +1684,7 @@ static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value
                 "UPDATE dbmem_content SET hash = ?1 WHERE path = ?2 AND hash != ?1;";
             sqlite3_stmt *fix_vm = NULL;
             if (sqlite3_prepare_v2(db, fix_sql, -1, &fix_vm, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(fix_vm, 1, (sqlite3_int64)ctx->hash);
+                dbmem_bind_hash(fix_vm, 1, ctx->hash);
                 sqlite3_bind_text(fix_vm, 2, path, -1, SQLITE_STATIC);
                 sqlite3_step(fix_vm);
                 sqlite3_finalize(fix_vm);
@@ -1649,7 +1729,7 @@ static void dbmem_enable_sync (sqlite3_context *context, int argc, sqlite3_value
         }
     }
 
-    int rc = sqlite3_exec(db, "SELECT cloudsync_init('dbmem_content', 'cls', 3);", NULL, NULL, NULL);
+    int rc = sqlite3_exec(db, "SELECT cloudsync_init('dbmem_content');", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         sqlite3_result_error(context, sqlite3_errmsg(db), -1);
         return;

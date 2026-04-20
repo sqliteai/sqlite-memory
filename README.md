@@ -36,7 +36,7 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 - **Hybrid Search**: Combines vector similarity (cosine distance) with FTS5 full-text search for superior retrieval
 - **Smart Chunking**: Markdown-aware parsing preserves semantic boundaries
 - **Intelligent Sync**: Content-hash change detection skips unchanged files, atomically replaces modified ones, and cleans up deleted ones
-- **Transactional Safety**: Every sync operation runs inside a SAVEPOINT transaction - either fully succeeds or fully rolls back, no partially-indexed content
+- **Transactional Safety**: Text/file ingests run inside SAVEPOINT transactions, and directory sync uses transactional cleanup plus per-file transactional updates so failed files do not leave partial rows behind
 - **Efficient Storage**: Binary embeddings with configurable dimensions
 - **Embedding Cache**: Automatically caches computed embeddings, so re-indexing the same text skips redundant API calls and computation
 - **Flexible Embedding**: Use local models (llama.cpp) or [vectors.space](https://vectors.space) remote API
@@ -74,7 +74,7 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 ```sql
 -- Load extensions (sync is optional)
 .load ./vector
-.load ./sync
+.load ./cloudsync
 .load ./memory
 
 -- Configure embedding model (choose one):
@@ -84,8 +84,8 @@ SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 
 -- Option 2: Remote embedding via vectors.space (requires free API key from https://vectors.space)
 -- The provider name 'openai' selects the vectors.space OpenAI-compatible endpoint.
--- SELECT memory_set_model('openai', 'text-embedding-3-small');
 -- SELECT memory_set_apikey('your-vectorspace-api-key');
+-- SELECT memory_set_model('openai', 'text-embedding-3-small');
 
 -- Add some knowledge
 SELECT memory_add_text('SQLite is a C-language library that implements a small, fast,
@@ -160,7 +160,7 @@ All `memory_add_*` functions use content-hash change detection to avoid redundan
   1. **Cleanup**: Removes database entries for files that no longer exist on disk
   2. **Scan**: Recursively processes all matching files - adding new ones, replacing modified ones, and skipping unchanged ones
 
-Every sync operation is wrapped in a SQLite SAVEPOINT transaction. If anything fails mid-sync (embedding error, disk issue, etc.), the entire operation rolls back cleanly. There is no risk of partially-indexed files or orphaned entries.
+`memory_add_text()` and `memory_add_file()` each run inside a SQLite SAVEPOINT transaction. `memory_add_directory()` performs its cleanup pass transactionally and then processes each file in its own transaction. If one file fails, that file rolls back cleanly and previously-committed files remain valid; there are no partially-indexed rows or orphaned chunk/FTS entries for the failed file.
 
 This makes all sync functions safe to call repeatedly - for example, on a cron schedule or at agent startup - with minimal overhead.
 
@@ -258,8 +258,8 @@ FROM dbmem_content;
 -- Delete by context
 SELECT memory_delete_context('old-project');
 
--- Delete specific memory
-SELECT memory_delete(1234567890);
+-- Delete specific memory by hash
+SELECT memory_delete('9e3779b97f4a7c15');
 
 -- Clear all memories
 SELECT memory_clear();
@@ -279,8 +279,11 @@ cd sqlite-memory
 # Build (full build with local + remote engines)
 make
 
-# Run tests
+# Run parser/core unit tests + extension loading smoke test
 make test
+
+# Run the full SQL extension unit suite
+make test DEFINES="-DTEST_SQLITE_EXTENSION"
 ```
 
 ### Build Configurations
