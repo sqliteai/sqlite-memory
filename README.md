@@ -61,6 +61,9 @@ sqlite-memory bridges these concepts, allowing any SQLite-powered application to
 
 ## Getting Started
 
+> [!IMPORTANT]
+> Databases created with sqlite-memory versions earlier than `1.0.0` must be rebuilt before use with `1.0.0+`, because the internal schema changed.
+
 ### Prerequisites
 
 - SQLite
