@@ -2579,6 +2579,67 @@ TEST(sqlite_set_model_failed_reindex_preserves_existing_rows) {
     sqlite3_close(db);
 }
 
+// Regression: when memory_set_model() switches from a custom provider to a
+// remote provider (a different provider class), the previous custom engine
+// must be released immediately — not leaked until the database is closed.
+typedef struct {
+    int free_count;
+} tracking_free_state_t;
+
+static void *tracking_init(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
+    UNUSED_PARAM(model);
+    UNUSED_PARAM(api_key);
+    UNUSED_PARAM(xdata);
+    UNUSED_PARAM(err_msg);
+    // any non-NULL pointer is fine; the test only cares about the free callback
+    return calloc(1, 1);
+}
+
+static int tracking_compute(void *engine, const char *text, int text_len, void *xdata, dbmem_embedding_result_t *result) {
+    UNUSED_PARAM(engine);
+    UNUSED_PARAM(text);
+    UNUSED_PARAM(text_len);
+    UNUSED_PARAM(xdata);
+    UNUSED_PARAM(result);
+    return -1;
+}
+
+static void tracking_free(void *engine, void *xdata) {
+    tracking_free_state_t *s = (tracking_free_state_t *)xdata;
+    if (s) s->free_count++;
+    free(engine);
+}
+
+TEST(sqlite_set_model_releases_previous_engine_on_class_switch) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    // remote engine init requires an api key to succeed
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_apikey('test-key');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    tracking_free_state_t state = {0};
+    dbmem_provider_t prov = { .init = tracking_init, .compute = tracking_compute, .free = tracking_free, .xdata = &state };
+    rc = sqlite3_memory_register_provider(db, "tracker", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // activate the custom provider — ctx->custom_engine is now non-NULL
+    rc = exec_get_int(db, "SELECT memory_set_model('tracker', 'm1');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(state.free_count, 0);
+
+    // switch to a provider from a different class (remote). The previous
+    // custom engine must be released during this call, not kept alive on ctx.
+    rc = exec_get_int(db, "SELECT memory_set_model('openai', 'text-embedding-3-small');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(state.free_count, 1);
+
+    // closing the db must not double-free the already-released custom engine
+    sqlite3_close(db);
+    ASSERT_EQ(state.free_count, 1);
+}
+
 #endif // TEST_SQLITE_EXTENSION
 
 // ============================================================================
@@ -2718,6 +2779,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_init_error);
     RUN_TEST(sqlite_custom_provider_apikey_passed);
     RUN_TEST(sqlite_set_model_failed_reindex_preserves_existing_rows);
+    RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
 #endif
 
     printf("\n=== Results ===\n");

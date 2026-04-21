@@ -1119,17 +1119,35 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     if (old_provider) dbmemory_free(old_provider);
     if (old_model) dbmemory_free(old_model);
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
-    if (!is_custom_provider && is_local_provider && old_l_engine && old_l_engine != new_l_engine) {
+    if (!is_custom_provider && is_local_provider) {
+        if (old_l_engine && old_l_engine != new_l_engine) {
+            dbmem_local_engine_free(old_l_engine);
+        }
+    } else if (old_l_engine) {
+        // switching away from local provider: release the previous engine
         dbmem_local_engine_free(old_l_engine);
+        ctx->l_engine = NULL;
     }
     #endif
     #ifndef DBMEM_OMIT_REMOTE_ENGINE
-    if (!is_custom_provider && !is_local_provider && old_r_engine && old_r_engine != new_r_engine) {
+    if (!is_custom_provider && !is_local_provider) {
+        if (old_r_engine && old_r_engine != new_r_engine) {
+            dbmem_remote_engine_free(old_r_engine);
+        }
+    } else if (old_r_engine) {
+        // switching away from remote provider: release the previous engine
         dbmem_remote_engine_free(old_r_engine);
+        ctx->r_engine = NULL;
     }
     #endif
-    if (is_custom_provider && old_custom_engine && old_custom_engine != new_custom_engine && ctx->custom_provider.free) {
+    if (is_custom_provider) {
+        if (old_custom_engine && old_custom_engine != new_custom_engine && ctx->custom_provider.free) {
+            ctx->custom_provider.free(old_custom_engine, ctx->custom_provider.xdata);
+        }
+    } else if (old_custom_engine && ctx->custom_provider.free) {
+        // switching away from custom provider: release the previous engine
         ctx->custom_provider.free(old_custom_engine, ctx->custom_provider.xdata);
+        ctx->custom_engine = NULL;
     }
 
     sqlite3_result_int(context, 1);
