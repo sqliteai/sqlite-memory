@@ -1071,6 +1071,7 @@ static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value 
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
 
+    #ifndef DBMEM_OMIT_REMOTE_ENGINE
     if (ctx->r_engine && !ctx->is_local && !ctx->is_custom) {
         int rc = dbmem_remote_engine_set_apikey(ctx->r_engine, apikey, ctx->error_msg);
         if (rc != SQLITE_OK) {
@@ -1079,6 +1080,7 @@ static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value 
             return;
         }
     }
+    #endif
 
     if (ctx->api_key) dbmemory_free(ctx->api_key);
     ctx->api_key = apikey;
