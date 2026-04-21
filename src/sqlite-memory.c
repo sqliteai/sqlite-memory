@@ -951,6 +951,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
 
     // detect model change (only if a model was previously configured)
     bool model_changed = false;
@@ -979,80 +980,159 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         #endif
     }
 
+    char *new_provider = dbmem_strdup(provider);
+    char *new_model = dbmem_strdup(model);
+    if (!new_provider || !new_model) {
+        if (new_provider) dbmemory_free(new_provider);
+        if (new_model) dbmemory_free(new_model);
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    char *old_provider = ctx->provider;
+    char *old_model = ctx->model;
+    bool old_is_local = ctx->is_local;
+    bool old_is_custom = ctx->is_custom;
+
+    #ifndef DBMEM_OMIT_LOCAL_ENGINE
+    dbmem_local_engine_t *old_l_engine = ctx->l_engine;
+    dbmem_local_engine_t *new_l_engine = ctx->l_engine;
+    #endif
+
+    #ifndef DBMEM_OMIT_REMOTE_ENGINE
+    dbmem_remote_engine_t *old_r_engine = ctx->r_engine;
+    dbmem_remote_engine_t *new_r_engine = ctx->r_engine;
+    #endif
+
+    void *old_custom_engine = ctx->custom_engine;
+    void *new_custom_engine = ctx->custom_engine;
+    bool set_model_started = false;
+    int rc = SQLITE_OK;
+
     // custom provider path
     if (is_custom_provider) {
-        // free previous custom engine if any
-        if (ctx->custom_engine && ctx->custom_provider.free) ctx->custom_provider.free(ctx->custom_engine, ctx->custom_provider.xdata);
-        ctx->custom_engine = NULL;
-
-        ctx->custom_engine = ctx->custom_provider.init(model, ctx->api_key, ctx->custom_provider.xdata, ctx->error_msg);
-        if (ctx->custom_engine == NULL) {
+        new_custom_engine = ctx->custom_provider.init(model, ctx->api_key, ctx->custom_provider.xdata, ctx->error_msg);
+        if (new_custom_engine == NULL) {
+            dbmemory_free(new_provider);
+            dbmemory_free(new_model);
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
         }
-        ctx->is_custom = true;
-        ctx->is_local = false;
     }
 
     // if provider is local then make sure model file exists
     #ifndef DBMEM_OMIT_LOCAL_ENGINE
     if (!is_custom_provider && is_local_provider) {
         if (dbmem_file_exists(model) == false) {
+            dbmemory_free(new_provider);
+            dbmemory_free(new_model);
             sqlite3_result_error(context, "Local model not found in the specified path", SQLITE_ERROR);
             return;
         }
 
-        if (ctx->l_engine) dbmem_local_engine_free(ctx->l_engine);
-        ctx->l_engine = NULL;
-
-        ctx->l_engine = dbmem_local_engine_init(ctx, model, ctx->error_msg);
-        if (ctx->l_engine == NULL) {
+        new_l_engine = dbmem_local_engine_init(ctx, model, ctx->error_msg);
+        if (new_l_engine == NULL) {
+            dbmemory_free(new_provider);
+            dbmemory_free(new_model);
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
         }
 
         if (ctx->engine_warmup) {
-            dbmem_local_engine_warmup(ctx->l_engine);
+            dbmem_local_engine_warmup(new_l_engine);
         }
-
-        ctx->is_local = true;
-        ctx->is_custom = false;
     }
     #endif
 
     #ifndef DBMEM_OMIT_REMOTE_ENGINE
     if (!is_custom_provider && !is_local_provider) {
-        if (ctx->r_engine) dbmem_remote_engine_free(ctx->r_engine);
-        ctx->r_engine = NULL;
-
-        ctx->r_engine = dbmem_remote_engine_init(ctx, provider, model, ctx->error_msg);
-        if (ctx->r_engine == NULL) {
+        new_r_engine = dbmem_remote_engine_init(ctx, provider, model, ctx->error_msg);
+        if (new_r_engine == NULL) {
+            dbmemory_free(new_provider);
+            dbmemory_free(new_model);
             sqlite3_result_error(context, ctx->error_msg, -1);
             return;
         }
-
-        ctx->is_local = false;
-        ctx->is_custom = false;
     }
     #endif
-    
+
+    ctx->provider = new_provider;
+    ctx->model = new_model;
+    ctx->is_local = is_custom_provider ? false : is_local_provider;
+    ctx->is_custom = is_custom_provider;
+    ctx->custom_engine = new_custom_engine;
+    #ifndef DBMEM_OMIT_LOCAL_ENGINE
+    ctx->l_engine = new_l_engine;
+    #endif
+    #ifndef DBMEM_OMIT_REMOTE_ENGINE
+    ctx->r_engine = new_r_engine;
+    #endif
+
+    rc = sqlite3_exec(db, "SAVEPOINT dbmem_set_model;", NULL, NULL, NULL);
+    if (rc == SQLITE_OK) set_model_started = true;
+
     // update settings
-    sqlite3 *db = sqlite3_context_db_handle(context);
-    int rc = dbmem_settings_write_text (db, DBMEM_SETTINGS_KEY_PROVIDER, provider);
-    if (rc == SQLITE_OK) rc = dbmem_settings_write_text (db, DBMEM_SETTINGS_KEY_MODEL, model);
-    
-    // sync settings
-    if (rc == SQLITE_OK) {
-        dbmem_settings_sync(ctx, DBMEM_SETTINGS_KEY_PROVIDER, argv[0]);
-        dbmem_settings_sync(ctx, DBMEM_SETTINGS_KEY_MODEL, argv[1]);
-    }
+    if (rc == SQLITE_OK) rc = dbmem_settings_write_text(db, DBMEM_SETTINGS_KEY_PROVIDER, provider);
+    if (rc == SQLITE_OK) rc = dbmem_settings_write_text(db, DBMEM_SETTINGS_KEY_MODEL, model);
 
     // reindex all content if the model changed
     if (model_changed && rc == SQLITE_OK) {
         rc = dbmem_reindex(ctx);
     }
 
-    (rc == SQLITE_OK) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+    if (rc == SQLITE_OK && set_model_started) {
+        rc = sqlite3_exec(db, "RELEASE dbmem_set_model;", NULL, NULL, NULL);
+        set_model_started = false;
+    }
+
+    if (rc != SQLITE_OK) {
+        if (set_model_started) {
+            sqlite3_exec(db, "ROLLBACK TO dbmem_set_model; RELEASE dbmem_set_model;", NULL, NULL, NULL);
+        }
+
+        ctx->provider = old_provider;
+        ctx->model = old_model;
+        ctx->is_local = old_is_local;
+        ctx->is_custom = old_is_custom;
+        ctx->custom_engine = old_custom_engine;
+        #ifndef DBMEM_OMIT_LOCAL_ENGINE
+        ctx->l_engine = old_l_engine;
+        if (!is_custom_provider && is_local_provider && new_l_engine != old_l_engine && new_l_engine) {
+            dbmem_local_engine_free(new_l_engine);
+        }
+        #endif
+        #ifndef DBMEM_OMIT_REMOTE_ENGINE
+        ctx->r_engine = old_r_engine;
+        if (!is_custom_provider && !is_local_provider && new_r_engine != old_r_engine && new_r_engine) {
+            dbmem_remote_engine_free(new_r_engine);
+        }
+        #endif
+        if (is_custom_provider && new_custom_engine != old_custom_engine && new_custom_engine && ctx->custom_provider.free) {
+            ctx->custom_provider.free(new_custom_engine, ctx->custom_provider.xdata);
+        }
+        dbmemory_free(new_provider);
+        dbmemory_free(new_model);
+        sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    if (old_provider) dbmemory_free(old_provider);
+    if (old_model) dbmemory_free(old_model);
+    #ifndef DBMEM_OMIT_LOCAL_ENGINE
+    if (!is_custom_provider && is_local_provider && old_l_engine && old_l_engine != new_l_engine) {
+        dbmem_local_engine_free(old_l_engine);
+    }
+    #endif
+    #ifndef DBMEM_OMIT_REMOTE_ENGINE
+    if (!is_custom_provider && !is_local_provider && old_r_engine && old_r_engine != new_r_engine) {
+        dbmem_remote_engine_free(old_r_engine);
+    }
+    #endif
+    if (is_custom_provider && old_custom_engine && old_custom_engine != new_custom_engine && ctx->custom_provider.free) {
+        ctx->custom_provider.free(old_custom_engine, ctx->custom_provider.xdata);
+    }
+
+    sqlite3_result_int(context, 1);
 }
 
 static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value **argv) {

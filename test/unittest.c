@@ -2566,6 +2566,16 @@ TEST(sqlite_set_model_failed_reindex_preserves_existing_rows) {
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_STR_EQ(context, "keep");
 
+    char provider[64];
+    rc = exec_get_text(db, "SELECT memory_get_option('provider');", provider, sizeof(provider));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(provider, "dummy");
+
+    char model[64];
+    rc = exec_get_text(db, "SELECT memory_get_option('model');", model, sizeof(model));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(model, "test-model");
+
     sqlite3_close(db);
 }
 
