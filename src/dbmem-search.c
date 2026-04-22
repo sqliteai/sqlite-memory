@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <float.h>
 #include <limits.h>
+#include <stddef.h>
 #include <time.h>
 
 #ifndef SQLITE_CORE
@@ -52,14 +53,14 @@ typedef struct {
     struct {
         int             count;
         double          *rank;
-        sqlite3_int64   *hash;
+        uint64_t        *hash;
         sqlite3_int64   *seq;
     } fts;
 
     struct {
         int             count;
         double          *rank;
-        sqlite3_int64   *hash;
+        uint64_t        *hash;
         sqlite3_int64   *seq;
     } semantic;
 
@@ -67,21 +68,45 @@ typedef struct {
         int             count;
         double          *vectorScore;
         double          *textScore;
-        sqlite3_int64   *hash;
+        uint64_t        *hash;
         sqlite3_int64   *seq;
         int             *hasVector;
         int             *hasFts;
     } merge;
 
     double              *rank;
-    sqlite3_int64       *hash;
+    uint64_t            *hash;
     sqlite3_int64       *seq;
 
 } vMemorySearchCursor;
 
+static int dbmem_search_bind_hash (sqlite3_stmt *vm, int index, uint64_t hash) {
+    char hash_text[DBMEM_HASH_STR_MAXLEN];
+    dbmem_hash_to_hex(hash, hash_text);
+    return sqlite3_bind_text(vm, index, hash_text, -1, SQLITE_TRANSIENT);
+}
+
+static bool dbmem_search_column_hash (sqlite3_stmt *vm, int column, uint64_t *hash) {
+    const char *hash_text = (const char *)sqlite3_column_text(vm, column);
+    return dbmem_hash_from_hex(hash_text, hash);
+}
+
 // MARK: - UTILS -
 
+static void vMemorySearchCursorReset (vMemorySearchCursor *c) {
+    if (c->buffer) dbmemory_free(c->buffer);
+    memset((char *)c + offsetof(vMemorySearchCursor, max_results), 0,
+           sizeof(*c) - offsetof(vMemorySearchCursor, max_results));
+}
+
 int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perform_fts) {
+    if (entries <= 0) {
+        vMemorySearchCursorReset(c);
+        c->max_results = entries;
+        c->perform_fts = perform_fts;
+        return SQLITE_OK;
+    }
+
     // one buffer to rule them all
     // fts (if enabled): rank, hash, seq = 3 arrays * entries
     // semantic: rank, hash, seq = 3 arrays * entries
@@ -94,26 +119,26 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     // fts arrays
     if (perform_fts) {
         size += sizeof(double) * entries;           // fts.rank
-        size += sizeof(sqlite3_int64) * entries;    // fts.hash
+        size += sizeof(uint64_t) * entries;         // fts.hash
         size += sizeof(sqlite3_int64) * entries;    // fts.seq
     }
 
     // semantic arrays
     size += sizeof(double) * entries;               // semantic.rank
-    size += sizeof(sqlite3_int64) * entries;        // semantic.hash
+    size += sizeof(uint64_t) * entries;             // semantic.hash
     size += sizeof(sqlite3_int64) * entries;        // semantic.seq
 
     // merge arrays (2x entries for union of both sources)
     size += sizeof(double) * merge_entries;         // merge.vectorScore
     size += sizeof(double) * merge_entries;         // merge.textScore
-    size += sizeof(sqlite3_int64) * merge_entries;  // merge.hash
+    size += sizeof(uint64_t) * merge_entries;       // merge.hash
     size += sizeof(sqlite3_int64) * merge_entries;  // merge.seq
     size += sizeof(int) * merge_entries;            // merge.hasVector
     size += sizeof(int) * merge_entries;            // merge.hasFts
 
     // final arrays
     size += sizeof(double) * entries;               // rank
-    size += sizeof(sqlite3_int64) * entries;        // hash
+    size += sizeof(uint64_t) * entries;             // hash
     size += sizeof(sqlite3_int64) * entries;        // seq
 
     char *buffer = (char *)dbmemory_zeroalloc(size);
@@ -127,8 +152,8 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     if (perform_fts) {
         c->fts.rank = (double *)buffer;
         buffer += sizeof(double) * entries;
-        c->fts.hash = (sqlite3_int64 *)buffer;
-        buffer += sizeof(sqlite3_int64) * entries;
+        c->fts.hash = (uint64_t *)buffer;
+        buffer += sizeof(uint64_t) * entries;
         c->fts.seq = (sqlite3_int64 *)buffer;
         buffer += sizeof(sqlite3_int64) * entries;
     }
@@ -136,8 +161,8 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     // semantic
     c->semantic.rank = (double *)buffer;
     buffer += sizeof(double) * entries;
-    c->semantic.hash = (sqlite3_int64 *)buffer;
-    buffer += sizeof(sqlite3_int64) * entries;
+    c->semantic.hash = (uint64_t *)buffer;
+    buffer += sizeof(uint64_t) * entries;
     c->semantic.seq = (sqlite3_int64 *)buffer;
     buffer += sizeof(sqlite3_int64) * entries;
 
@@ -146,8 +171,8 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     buffer += sizeof(double) * merge_entries;
     c->merge.textScore = (double *)buffer;
     buffer += sizeof(double) * merge_entries;
-    c->merge.hash = (sqlite3_int64 *)buffer;
-    buffer += sizeof(sqlite3_int64) * merge_entries;
+    c->merge.hash = (uint64_t *)buffer;
+    buffer += sizeof(uint64_t) * merge_entries;
     c->merge.seq = (sqlite3_int64 *)buffer;
     buffer += sizeof(sqlite3_int64) * merge_entries;
     c->merge.hasVector = (int *)buffer;
@@ -158,8 +183,8 @@ int vMemorySearchCursorAllocate (vMemorySearchCursor *c, int entries, bool perfo
     // final rowset
     c->rank = (double *)buffer;
     buffer += sizeof(double) * entries;
-    c->hash = (sqlite3_int64 *)buffer;
-    buffer += sizeof(sqlite3_int64) * entries;
+    c->hash = (uint64_t *)buffer;
+    buffer += sizeof(uint64_t) * entries;
     c->seq = (sqlite3_int64 *)buffer;
 
     return SQLITE_OK;
@@ -183,7 +208,7 @@ int vMemorySearchCursorMerge(vMemorySearchCursor *c, double vectorWeight, double
 
     // add/merge FTS results (already normalized to 0..1)
     for (int i = 0; i < c->fts.count; i++) {
-        sqlite3_int64 hash = c->fts.hash[i];
+        uint64_t hash = c->fts.hash[i];
         sqlite3_int64 seq = c->fts.seq[i];
 
         // check if already in merge list
@@ -230,7 +255,7 @@ int vMemorySearchCursorMerge(vMemorySearchCursor *c, double vectorWeight, double
     // swap all parallel arrays together
     for (int i = 1; i < c->merge.count; i++) {
         double tempScore = c->merge.textScore[i];
-        sqlite3_int64 tempHash = c->merge.hash[i];
+        uint64_t tempHash = c->merge.hash[i];
         sqlite3_int64 tempSeq = c->merge.seq[i];
 
         int j = i - 1;
@@ -269,7 +294,7 @@ static void vMemorySearchUpdateAccess(sqlite3 *db, vMemorySearchCursor *c) {
 
     for (int i = 0; i < c->count; i++) {
         sqlite3_bind_int64(vm, 1, now);
-        sqlite3_bind_int64(vm, 2, c->hash[i]);
+        dbmem_search_bind_hash(vm, 2, c->hash[i]);
         sqlite3_step(vm);
         sqlite3_reset(vm);
     }
@@ -308,8 +333,7 @@ static int dbmem_fts_search (sqlite3 *db, vMemorySearchCursor *c, const char *in
         "SELECT rank, hash, seq FROM dbmem_vault_fts WHERE content MATCH ?1 ORDER BY rank LIMIT ?2";
     static const char *sql_with_context =
         "SELECT fts.rank, fts.hash, fts.seq FROM dbmem_vault_fts AS fts "
-        "JOIN dbmem_vault AS v ON fts.hash = v.hash AND fts.seq = v.seq "
-        "WHERE fts.content MATCH ?1 AND INSTR(',' || ?3 || ',', ',' || v.context || ',') > 0 "
+        "WHERE fts.content MATCH ?1 AND INSTR(',' || ?3 || ',', ',' || fts.context || ',') > 0 "
         "ORDER BY fts.rank LIMIT ?2";
     const char *sql = (context) ? sql_with_context : sql_no_context;
     
@@ -347,7 +371,10 @@ static int dbmem_fts_search (sqlite3 *db, vMemorySearchCursor *c, const char *in
         if (rank > rank_max) rank_max = rank;
         
         c->fts.rank[count] = rank;
-        c->fts.hash[count] = sqlite3_column_int64(vm, 1);
+        if (!dbmem_search_column_hash(vm, 1, &c->fts.hash[count])) {
+            rc = SQLITE_MISMATCH;
+            break;
+        }
         c->fts.seq[count] = sqlite3_column_int64(vm, 2);
         c->fts.count++;
         
@@ -409,7 +436,10 @@ static int dbmem_semantic_search (sqlite3 *db, vMemorySearchCursor *c, float *em
         
         // SQLITE_ROW
         c->semantic.rank[count] = sqlite3_column_double(vm, 0);
-        c->semantic.hash[count] = sqlite3_column_int64(vm, 1);
+        if (!dbmem_search_column_hash(vm, 1, &c->semantic.hash[count])) {
+            rc = SQLITE_MISMATCH;
+            break;
+        }
         c->semantic.seq[count] = sqlite3_column_int64(vm, 2);
         c->semantic.count++;
         
@@ -504,7 +534,7 @@ static int vMemorySearchCursorOpen (sqlite3_vtab *pVtab, sqlite3_vtab_cursor **p
 
 static int vMemorySearchCursorClose (sqlite3_vtab_cursor *cur){
     vMemorySearchCursor *c = (vMemorySearchCursor *)cur;
-    if (c->buffer) dbmemory_free(c->buffer);
+    vMemorySearchCursorReset(c);
     dbmemory_free(c);
     return SQLITE_OK;
 }
@@ -530,7 +560,10 @@ static int vMemorySearchCursorColumn (sqlite3_vtab_cursor *cur, sqlite3_context 
     
     switch (iCol) {
         case SEARCH_COLUMN_HASH:
-            sqlite3_result_int64(context, c->hash[c->index]);
+        {
+            char hash_text[DBMEM_HASH_STR_MAXLEN];
+            sqlite3_result_text(context, dbmem_hash_to_hex(c->hash[c->index], hash_text), -1, SQLITE_TRANSIENT);
+        }
             break;
             
         case SEARCH_COLUMN_SEQ:
@@ -546,7 +579,7 @@ static int vMemorySearchCursorColumn (sqlite3_vtab_cursor *cur, sqlite3_context 
             const char *sql = (iCol == SEARCH_COLUMN_PATH) ? path_sql : snippet_sql;
             sqlite3_stmt *vm = NULL;
             if (sqlite3_prepare_v2(db, sql, -1, &vm, NULL) == SQLITE_OK) {
-                sqlite3_bind_int64(vm, 1, c->hash[c->index]);
+                dbmem_search_bind_hash(vm, 1, c->hash[c->index]);
                 if (iCol == SEARCH_COLUMN_SNIPPET) sqlite3_bind_int64(vm, 2, c->seq[c->index]);
                 if (sqlite3_step(vm) == SQLITE_ROW) sqlite3_result_value(context, sqlite3_column_value(vm, 0));
             }
@@ -610,6 +643,12 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
         fetch_count = max_results * oversample;
     } else {
         fetch_count = max_results;
+    }
+
+    vMemorySearchCursorReset(c);
+    if (fetch_count <= 0) {
+        c->count = 0;
+        return SQLITE_OK;
     }
 
     // allocate internal cursor buffer
@@ -698,9 +737,9 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     printf("=================================\n");
     for (int i = 0; i < c->count; i++) {
         double rank = c->rank[i];
-        sqlite3_int64 hash = c->hash[i];
+        uint64_t hash = c->hash[i];
         sqlite3_int64 seq = c->seq[i];
-        printf("%3d %.3f %20lld %2lld\n", i, rank, (long long)hash, (long long)seq);
+        printf("%3d %.3f %016llx %2lld\n", i, rank, (unsigned long long)hash, (long long)seq);
     }
     printf("=================================\n");
     #endif

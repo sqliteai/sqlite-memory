@@ -13,10 +13,10 @@ The test runs in eight phases:
 
 | Phase | Description |
 |-------|-------------|
-| 1 | Open separate in-memory databases for Agent A and Agent B |
+| 1 | Open separate temporary file-backed databases for Agent A and Agent B |
 | 2 | Enable CRDT sync on both agents before ingesting content |
-| 3 | Each agent ingests its own knowledge (embeddings computed locally) |
-| 4 | Pre-sync isolation: each agent can answer its own topic, not the other's |
+| 3 | Each agent ingests its own knowledge using the remote `vectors.space` embedding service |
+| 4 | Pre-sync isolation: each agent can answer its own topic, not the other's, and context-filtered FTS works locally |
 | 5 | Connect both agents to the shared SQLiteCloud managed database |
 | 6 | Bidirectional sync: each agent pushes its content and pulls the other's |
 | 7 | Reindex: each agent generates embeddings for the newly received content |
@@ -34,6 +34,8 @@ AI agents increasingly need to share knowledge without tight coupling. Each agen
 - **Scalable to many agents** — the same pattern extends to fleets of agents accumulating knowledge in parallel and merging it into a coherent shared corpus
 
 This is the foundation for distributed agent memory: a growing body of knowledge that no single agent owns but all agents contribute to and benefit from.
+
+The sync test uses the remote `vectors.space` embedding API via `provider='llama'` and `model='embeddinggemma-300m'`. That keeps setup lightweight because users do not need to download a local GGUF model just to run the sync scenario.
 
 ## Dependencies
 
@@ -62,7 +64,7 @@ The sync layer routes changes through a [SQLiteCloud](https://sqlitecloud.io/) m
 3. **Create the memory table** — connect to your database and run:
    ```sql
    CREATE TABLE IF NOT EXISTS dbmem_content (
-       hash          INTEGER PRIMARY KEY NOT NULL,
+       hash          TEXT    PRIMARY KEY NOT NULL,
        path          TEXT    NOT NULL DEFAULT '' UNIQUE,
        value         TEXT    DEFAULT NULL,
        length        INTEGER NOT NULL DEFAULT 0,
@@ -74,7 +76,7 @@ The sync layer routes changes through a [SQLiteCloud](https://sqlitecloud.io/) m
 4. **Enable OffSync** for the database: open the database, click **OffSync**, and enable synchronization. This provisions the CloudSync microservice that routes changes between agents.
 5. **Enable OffSync for the table** — initialize sync on `dbmem_content` and configure the `value` column to use block-level LWW so that concurrent agent edits to different lines of the same entry are preserved rather than overwritten. This can be done from the dashboard UI (Database → OffSync section) or via SQL:
    ```sql
-   SELECT cloudsync_init('dbmem_content', 'cls', 1);
+   SELECT cloudsync_init('dbmem_content');
    SELECT cloudsync_set_column('dbmem_content', 'value', 'algo', 'block');
    ```
 6. **Copy the managed database ID** — shown on the OffSync page (format: `db_xxxxxxxxxxxx`).
@@ -84,12 +86,12 @@ The sync layer routes changes through a [SQLiteCloud](https://sqlitecloud.io/) m
 
 | Variable | Description |
 |----------|-------------|
+| `APIKEY` | vectors.space API key used for `memory_set_model('llama', 'embeddinggemma-300m')` |
 | `SYNC_DB_ID` | Managed database ID from the OffSync page |
 | `SYNC_APIKEY_A` | API key for Agent A |
 | `SYNC_APIKEY_B` | API key for Agent B |
-| `APIKEY` | vectors.space API key for computing embeddings |
 
-The Makefile has defaults baked in for the project's own test database. To use your own:
+The Makefile has defaults baked in for the project's own test database. To use your own SQLiteCloud database and keys:
 
 ```sh
 make sync-test \
@@ -107,15 +109,15 @@ make sync-test \
 make sync-test DEFINES="-DTEST_SQLITE_EXTENSION" APIKEY=your_vectors_space_key
 ```
 
-The test creates two temporary SQLite databases in `/tmp/`, runs the full eight-phase scenario, and cleans up on exit. Expected output:
+The test creates two temporary SQLite database files in `/tmp/`, runs the full eight-phase scenario, and cleans up on exit. Expected output:
 
 ```
 Sync integration test: JWST (Agent A) + Great Barrier Reef (Agent B)
 =======================================================================
 ...
 === Sync Test Results ===
-Tests run:    26
-Tests passed: 26
+Tests run:    28
+Tests passed: 28
 Tests failed: 0
 
 Sync test passed!
@@ -125,6 +127,6 @@ Sync test passed!
 
 The test uses `cloudsync_network_sync(500, 3)` called twice per agent in sequence. The first call pushes local changes to the cloud; the second call (after the other agent has pushed) pulls remote changes. No manual version resets or delays are needed; the two-round pattern is the standard approach for bidirectional peer exchange described in the [SQLite Sync documentation](https://github.com/sqliteai/sqlite-sync).
 
-CRDT sync is enabled on `dbmem_content` with the `cls` algorithm. The `value` column (which stores the raw text) uses the `block` algorithm so that line-level changes from concurrent agents are preserved rather than replaced wholesale.
+Sync is enabled on `dbmem_content`, and the `value` column (which stores the raw text) is configured with the `block` algorithm so that line-level changes from concurrent agents are preserved rather than replaced wholesale.
 
 After receiving content via sync, each agent calls `memory_reindex()` to generate embeddings for the newly arrived rows. Only rows not yet in the local embedding vault are processed, so existing embeddings are never duplicated.

@@ -100,9 +100,15 @@ void dbmem_logger (enum ggml_log_level level, const char *text, void *user_data)
 
 // MARK: -
 
+static void dbmem_local_set_error(dbmem_local_engine_t *engine, const char *message) {
+    if (!engine || !engine->context) return;
+    dbmem_context_set_error(engine->context, message);
+}
+
 dbmem_local_engine_t *dbmem_local_engine_init (void *ctx, const char *model_path, char err_msg[DBMEM_ERRBUF_SIZE]) {
     dbmem_local_engine_t *engine = (dbmem_local_engine_t *)dbmemory_zeroalloc(sizeof(dbmem_local_engine_t));
     if (!engine) return NULL;
+    engine->context = (dbmem_context *)ctx;
     
     // set logger
     llama_log_set(dbmem_logger, engine);
@@ -212,7 +218,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     // Tokenize
     int n_tokens = llama_tokenize(engine->vocab, text, text_len, engine->tokens, engine->tokens_capacity, true, true);
     if (n_tokens < 0) {
-        dbmem_context_set_error(engine->context, "Tokenization failed (text too long?)");
+        dbmem_local_set_error(engine, "Tokenization failed (text too long?)");
         return -1;
     }
 
@@ -242,7 +248,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     // Encode
     int ret = llama_encode(engine->ctx, batch);
     if (ret != 0) {
-        dbmem_context_set_error(engine->context, "Llama_encode failed");
+        dbmem_local_set_error(engine, "Llama_encode failed");
         return -1;
     }
 
@@ -255,7 +261,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     }
 
     if (!emb_ptr) {
-        dbmem_context_set_error(engine->context, "Failed to get embeddings");
+        dbmem_local_set_error(engine, "Failed to get embeddings");
         return -1;
     }
 
@@ -301,5 +307,5 @@ void dbmem_local_engine_free (dbmem_local_engine_t *engine) {
     }
     
     llama_backend_free();
+    dbmemory_free(engine);
 }
-

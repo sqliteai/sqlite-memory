@@ -29,6 +29,7 @@ void dbmem_local_engine_free (dbmem_local_engine_t *engine);
 
 dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider, const char *model, char err_msg[DBMEM_ERRBUF_SIZE]);
 int  dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *text, int text_len, embedding_result_t *result);
+int  dbmem_remote_engine_set_apikey (dbmem_remote_engine_t *engine, const char *api_key, char err_msg[DBMEM_ERRBUF_SIZE]);
 void dbmem_remote_engine_free (dbmem_remote_engine_t *engine);
 
 // Custom provider (always available, defined in sqlite-memory.c)
