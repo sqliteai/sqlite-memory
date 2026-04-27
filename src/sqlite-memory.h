@@ -39,7 +39,7 @@ typedef struct dbmem_context dbmem_context;
 
 typedef struct {
     int      n_tokens;
-    int      n_tokens_truncated;
+    bool     truncated;
     int      n_embd;
     float    *embedding;          // Engine-owned buffer, valid until next call or free
 } dbmem_embedding_result_t;

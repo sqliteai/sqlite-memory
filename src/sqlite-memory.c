@@ -642,7 +642,7 @@ int dbmem_context_custom_compute (dbmem_context *ctx, const char *text, int text
     int rc = ctx->custom_provider.compute(ctx->custom_engine, text, text_len, ctx->custom_provider.xdata, &cr);
     if (rc != 0) return rc;
     result->n_tokens = cr.n_tokens;
-    result->n_tokens_truncated = cr.n_tokens_truncated;
+    result->truncated = cr.truncated;
     result->n_embd = cr.n_embd;
     result->embedding = cr.embedding;
     return 0;
@@ -1249,7 +1249,7 @@ cleanup:
 static void dbmem_dump_embeding (const embedding_result_t *result) {
     printf("{\n");
     printf("  \"n_tokens\": %d,\n", result->n_tokens);
-    printf("  \"n_tokens_truncated\": %d,\n", result->n_tokens_truncated);
+    printf("  \"truncated\": %s,\n", result->truncated ? "true" : "false");
     printf("  \"n_embd\": %d,\n", result->n_embd);
     printf("  \"embedding\": [");
 
@@ -1301,7 +1301,7 @@ static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embeddin
     result->embedding = ctx->cache_buffer;
     result->n_embd = dimension;
     result->n_tokens = 0;
-    result->n_tokens_truncated = 0;
+    result->truncated = false;
     found = true;
 
 cleanup:

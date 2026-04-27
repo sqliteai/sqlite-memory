@@ -223,9 +223,9 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
     }
 
     // Handle token overflow: truncate to max context size
-    int n_tokens_truncated = 0;
+    bool truncated = false;
     if (n_tokens > engine->n_ctx) {
-        n_tokens_truncated = n_tokens - engine->n_ctx;
+        truncated = true;
         n_tokens = engine->n_ctx;
     }
 
@@ -275,7 +275,7 @@ int dbmem_local_compute_embedding (dbmem_local_engine_t *engine, const char *tex
 
     // Fill result
     result->n_tokens = n_tokens;
-    result->n_tokens_truncated = n_tokens_truncated;
+    result->truncated = truncated;
     result->n_embd = engine->n_embd;
     result->embedding = engine->embedding;
 

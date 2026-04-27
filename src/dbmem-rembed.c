@@ -210,6 +210,13 @@ static int set_json_error_message (dbmem_remote_engine_t *engine) {
     return -1;
 }
 
+#if ENABLE_DBMEM_DEBUG
+static void dbmem_remote_debug_log_response(dbmem_remote_engine_t *engine, long http_code) {
+    const char *response = engine->data ? engine->data : "";
+    DEBUG_DBMEM_ALWAYS("[dbmem-rembed] vectors.space response (HTTP %ld): %s", http_code, response);
+}
+#endif
+
 // MARK: -
 
 dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider, const char *model, char err_msg[DBMEM_ERRBUF_SIZE]) {
@@ -450,6 +457,10 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     sqlite3_free(response_data);
 #endif
 
+#if ENABLE_DBMEM_DEBUG
+    dbmem_remote_debug_log_response(engine, http_code);
+#endif
+
     if (http_code != 200) {
         return set_json_error_message(engine);
     }
@@ -482,6 +493,8 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     int n_embd = 0;
     int prompt_tokens = 0;
     int estimated_prompt_tokens = 0;
+    int exact_prompt_tokens = 0;
+    bool truncated = false;
     int emb_start = -1;
     size_t emb_count = 0;
 
@@ -501,8 +514,13 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
             n_embd = atoi(engine->data + tokens[i + 1].start);
         } else if (klen == 13 && memcmp(key, "prompt_tokens", 13) == 0 && tokens[i + 1].type == JSMN_PRIMITIVE) {
             prompt_tokens = atoi(engine->data + tokens[i + 1].start);
+        } else if (klen == 19 && memcmp(key, "exact_prompt_tokens", 19) == 0 && tokens[i + 1].type == JSMN_PRIMITIVE) {
+            exact_prompt_tokens = atoi(engine->data + tokens[i + 1].start);
         } else if (klen == 23 && memcmp(key, "estimated_prompt_tokens", 23) == 0) {
             estimated_prompt_tokens = atoi(engine->data + tokens[i + 1].start);
+        } else if (klen == 9 && memcmp(key, "truncated", 9) == 0 && tokens[i + 1].type == JSMN_PRIMITIVE) {
+            truncated = (tokens[i + 1].end - tokens[i + 1].start == 4) &&
+                        (memcmp(engine->data + tokens[i + 1].start, "true", 4) == 0);
         }
     }
 
@@ -529,8 +547,8 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
 
     // Fill result
     result->n_embd = n_embd;
-    result->n_tokens = prompt_tokens;
-    result->n_tokens_truncated = (estimated_prompt_tokens > prompt_tokens) ? estimated_prompt_tokens - prompt_tokens : 0;
+    result->n_tokens = exact_prompt_tokens > 0 ? exact_prompt_tokens : (estimated_prompt_tokens > 0 ? estimated_prompt_tokens : prompt_tokens);
+    result->truncated = truncated;
     result->embedding = engine->embedding;
 
     // Update statistics
