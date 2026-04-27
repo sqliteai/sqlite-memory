@@ -210,7 +210,7 @@ static int set_json_error_message (dbmem_remote_engine_t *engine) {
     return -1;
 }
 
-#if ENABLE_DBMEM_DEBUG
+#if ENABLE_DBMEM_DEBUG_EMBEDDING
 static void dbmem_remote_debug_log_response(dbmem_remote_engine_t *engine, long http_code) {
     const char *response = engine->data ? engine->data : "";
     DEBUG_DBMEM_ALWAYS("[dbmem-rembed] vectors.space response (HTTP %ld): %s", http_code, response);
@@ -457,7 +457,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     sqlite3_free(response_data);
 #endif
 
-#if ENABLE_DBMEM_DEBUG
+#if ENABLE_DBMEM_DEBUG_EMBEDDING
     dbmem_remote_debug_log_response(engine, http_code);
 #endif
 
@@ -552,7 +552,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     result->embedding = engine->embedding;
 
     // Update statistics
-    engine->total_tokens_processed += prompt_tokens;
+    engine->total_tokens_processed += result->n_tokens;
     engine->total_embeddings_generated++;
 
     return 0;
