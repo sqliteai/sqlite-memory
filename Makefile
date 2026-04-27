@@ -6,6 +6,7 @@ OMIT_LOCAL_ENGINE  ?= 0
 OMIT_REMOTE_ENGINE ?= 0
 OMIT_IO            ?= 0
 OMIT_CURL          ?= 0
+REMOTE_ENGINE_API_URL ?= https://api.vectors.space/v1/embeddings
 LLAMA ?=
 CURL_VERSION   ?= 8.12.1
 MBEDTLS_VERSION ?= 3.6.5
@@ -277,6 +278,7 @@ endif
 
 ifeq ($(OMIT_REMOTE_ENGINE),0)
     C_SOURCES += $(SRC_DIR)/dbmem-rembed.c
+	override DEFINES += -DDBMEM_REMOTE_API_URL=\"$(REMOTE_ENGINE_API_URL)\"
     ifeq ($(OMIT_CURL),1)
         override DEFINES += -DDBMEM_OMIT_CURL
         OBJC_SOURCES := $(SRC_DIR)/dbmem-http.m
@@ -770,6 +772,7 @@ help:
 	@echo "Build options:"
 	@echo "  OMIT_LOCAL_ENGINE=1   - Build without llama.cpp (local embeddings)"
 	@echo "  OMIT_REMOTE_ENGINE=1  - Build without remote embedding support"
+	@echo "  REMOTE_ENGINE_API_URL=<url> - Remote embedding endpoint (default: $(REMOTE_ENGINE_API_URL))"
 	@echo "  OMIT_IO=1             - Build without file/directory functions"
 	@echo ""
 	@echo "Examples:"
@@ -788,6 +791,7 @@ help:
 	@echo "  OMIT_LOCAL_ENGINE=$(OMIT_LOCAL_ENGINE)"
 	@echo "  OMIT_REMOTE_ENGINE=$(OMIT_REMOTE_ENGINE)"
 	@echo "  OMIT_IO=$(OMIT_IO)"
+	@echo "  REMOTE_ENGINE_API_URL=$(REMOTE_ENGINE_API_URL)"
 
 .PHONY: debug
 debug: CFLAGS += -g -O0 -DENABLE_DBMEM_DEBUG=1
@@ -813,3 +817,4 @@ vars:
 	@echo "OMIT_LOCAL_ENGINE = $(OMIT_LOCAL_ENGINE)"
 	@echo "OMIT_REMOTE_ENGINE= $(OMIT_REMOTE_ENGINE)"
 	@echo "OMIT_IO           = $(OMIT_IO)"
+	@echo "REMOTE_ENGINE_API_URL = $(REMOTE_ENGINE_API_URL)"

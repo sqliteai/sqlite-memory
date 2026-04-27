@@ -21,7 +21,9 @@
 static size_t cacert_len = sizeof(cacert_pem) - 1;
 #endif
 
-#define API_URL                 "https://api.vectors.space/v1/embeddings"
+#ifndef DBMEM_REMOTE_API_URL
+#define DBMEM_REMOTE_API_URL    "https://api.vectors.space/v1/embeddings"
+#endif
 #define DEFAULT_BUFFER_SIZE     (100*1024) //100KB, enough for 4096 embedding dimension without reallocation
 
 #ifndef DBMEM_OMIT_CURL
@@ -324,7 +326,7 @@ dbmem_remote_engine_t *dbmem_remote_engine_init (void *ctx, const char *provider
 
 #ifndef DBMEM_OMIT_CURL
     // set static curl options (only POSTFIELDS changes per call)
-    curl_easy_setopt(curl, CURLOPT_URL, API_URL);
+    curl_easy_setopt(curl, CURLOPT_URL, DBMEM_REMOTE_API_URL);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, dbmem_remote_receive_data);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)engine);
@@ -423,7 +425,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     long http_code = 0;
     char http_err[DBMEM_ERRBUF_SIZE];
 
-    int rc = dbmem_http_post(API_URL, engine->api_key, engine->request,
+    int rc = dbmem_http_post(DBMEM_REMOTE_API_URL, engine->api_key, engine->request,
                              &response_data, &response_size, &http_code,
                              http_err, sizeof(http_err));
     if (rc != 0) {
