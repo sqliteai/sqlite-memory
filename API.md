@@ -564,8 +564,8 @@ typedef struct {
 **`dbmem_embedding_result_t` struct:**
 ```c
 typedef struct {
-    int    n_tokens;            // Number of tokens processed
-    int    n_tokens_truncated;  // Tokens that were truncated (0 if none)
+    int    n_tokens;            // Number of processed tokens (0 if unknown)
+    bool   truncated;           // True when the input was truncated before embedding
     int    n_embd;              // Embedding dimension
     float *embedding;           // Embedding vector (engine-owned, valid until next call or free)
 } dbmem_embedding_result_t;
@@ -574,6 +574,7 @@ typedef struct {
 **Notes:**
 - Works regardless of `DBMEM_OMIT_LOCAL_ENGINE` / `DBMEM_OMIT_REMOTE_ENGINE` compile flags
 - The `embedding` buffer in `dbmem_embedding_result_t` must remain valid until the next `compute` call or `free` — it is engine-owned, not copied by the caller
+- `n_tokens` is metadata about the processed input when the engine can provide it; `truncated` is a boolean flag, not a truncated-token count
 - Only one custom provider can be registered per connection at a time; registering again replaces the previous one
 - The provider struct is copied by value; the caller does not need to keep it alive after registration
 
@@ -596,7 +597,7 @@ static int my_compute(void *engine, const char *text, int text_len, void *xdata,
     // ... fill vec with your embedding ...
     result->n_embd = e->dimension;
     result->n_tokens = text_len / 4;
-    result->n_tokens_truncated = 0;
+    result->truncated = false;
     result->embedding = vec;
     return 0;
 }
