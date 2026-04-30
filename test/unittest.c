@@ -2359,7 +2359,7 @@ static int dummy_compute(void *engine, const char *text, int text_len, void *xda
     dummy_engine_t *e = (dummy_engine_t *)engine;
     e->compute_count++;
     result->n_tokens = text_len / 4;
-    result->n_tokens_truncated = 0;
+    result->truncated = false;
     result->n_embd = e->dimension;
     result->embedding = e->embedding;
     return 0;

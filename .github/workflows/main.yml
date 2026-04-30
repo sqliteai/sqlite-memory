@@ -364,7 +364,7 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::build unittest binary for android"
-          make build/unittest ${{ matrix.make }} SQLITE_AMALGAM=${SQLITE_DIR}/sqlite3.c
+          make build/unittest ${{ matrix.make }} SQLITE_AMALGAM=${SQLITE_DIR}/sqlite3.c DEFINES="-DTEST_SQLITE_EXTENSION"
           echo "::endgroup::"
 
           echo "::group::build e2e binary for android"
@@ -406,12 +406,12 @@ jobs:
 
       - name: unix test sqlite-memory
         if: matrix.skip_test != true && matrix.os != 'windows-2022' && matrix.name != 'android'
-        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}}
+        run: ${{ matrix.name == 'linux-musl' && matrix.arch == 'arm64' && 'docker exec alpine' || '' }} make test ${{ matrix.make && matrix.make || ''}} DEFINES="-DTEST_SQLITE_EXTENSION"
 
       - name: windows test sqlite-memory
         if: matrix.skip_test != true && matrix.name == 'windows'
         shell: msys2 {0}
-        run: make test ${{ matrix.make && matrix.make || ''}}
+        run: make test ${{ matrix.make && matrix.make || ''}} DEFINES="-DTEST_SQLITE_EXTENSION"
 
       - name: unix e2e sqlite-memory
         if: matrix.skip_test != true && matrix.variant != 'local' && matrix.os != 'windows-2022' && matrix.name != 'android'
