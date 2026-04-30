@@ -2610,6 +2610,7 @@ static void tracking_free(void *engine, void *xdata) {
     free(engine);
 }
 
+#ifndef DBMEM_OMIT_REMOTE_ENGINE
 TEST(sqlite_set_model_releases_previous_engine_on_class_switch) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -2639,6 +2640,37 @@ TEST(sqlite_set_model_releases_previous_engine_on_class_switch) {
     sqlite3_close(db);
     ASSERT_EQ(state.free_count, 1);
 }
+#else
+TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_apikey('test-key');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    tracking_free_state_t state = {0};
+    dbmem_provider_t prov = { .init = tracking_init, .compute = tracking_compute, .free = tracking_free, .xdata = &state };
+    rc = sqlite3_memory_register_provider(db, "tracker", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_model('tracker', 'm1');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(state.free_count, 0);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_set_model('openai', 'text-embedding-3-small');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    ASSERT_EQ(state.free_count, 0);
+
+    sqlite3_close(db);
+    ASSERT_EQ(state.free_count, 1);
+}
+#endif
 
 #endif // TEST_SQLITE_EXTENSION
 
@@ -2779,7 +2811,11 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_init_error);
     RUN_TEST(sqlite_custom_provider_apikey_passed);
     RUN_TEST(sqlite_set_model_failed_reindex_preserves_existing_rows);
+#ifndef DBMEM_OMIT_REMOTE_ENGINE
     RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
+#else
+    RUN_TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine);
+#endif
 #endif
 
     printf("\n=== Results ===\n");
