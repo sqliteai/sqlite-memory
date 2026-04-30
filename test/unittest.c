@@ -1960,9 +1960,15 @@ TEST(sqlite_sync_directory_skips_unchanged) {
     mkdir_p(test_dir);
     create_test_file(file, content);
 
-    // Compute the hash and pre-insert the entry
-    uint64_t hash = dbmem_hash_compute(content, strlen(content));
-    int rc = insert_fake_content(db, hash, file, "notes", (sqlite3_int64)strlen(content));
+    // Compute the hash from disk so Windows text-mode newline translation
+    // cannot make the pre-inserted hash differ from memory_add_directory().
+    int64_t len = 0;
+    char *buf = dbmem_file_read(file, &len);
+    ASSERT(buf != NULL);
+    uint64_t hash = dbmem_hash_compute(buf, (size_t)len);
+    dbmemory_free(buf);
+
+    int rc = insert_fake_content(db, hash, file, "notes", len);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Sync — file exists with matching hash, should be skipped
