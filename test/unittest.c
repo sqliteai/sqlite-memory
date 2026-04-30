@@ -1844,12 +1844,12 @@ TEST(sqlite_sync_directory_removes_deleted) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    const char *test_dir = "/tmp/dbmem_test_sync_del";
-    const char *file_keep = "/tmp/dbmem_test_sync_del/keep.md";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_sync_del";
+    const char *file_keep = TEST_TMP_DIR "/dbmem_test_sync_del/keep.md";
 
     // Clean up
     remove(file_keep);
-    remove("/tmp/dbmem_test_sync_del/gone.md");
+    remove(TEST_TMP_DIR "/dbmem_test_sync_del/gone.md");
     rmdir_p(test_dir);
 
     // Create directory with one file
@@ -1867,7 +1867,7 @@ TEST(sqlite_sync_directory_removes_deleted) {
     int rc = insert_fake_content(db, keep_hash, file_keep, NULL, len);
     ASSERT_EQ(rc, SQLITE_OK);
 
-    rc = insert_fake_content(db, 99999, "/tmp/dbmem_test_sync_del/gone.md", NULL, 4);
+    rc = insert_fake_content(db, 99999, TEST_TMP_DIR "/dbmem_test_sync_del/gone.md", NULL, 4);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Verify 2 entries before sync
@@ -1878,7 +1878,7 @@ TEST(sqlite_sync_directory_removes_deleted) {
 
     // Sync — should remove the entry for gone.md, skip keep.md (hash match)
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_add_directory('/tmp/dbmem_test_sync_del');", &result);
+    rc = exec_get_int(db, "SELECT memory_add_directory('" TEST_TMP_DIR "/dbmem_test_sync_del');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Only keep.md entry should remain
@@ -1901,17 +1901,17 @@ TEST(sqlite_sync_directory_removes_all_deleted) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    const char *test_dir = "/tmp/dbmem_test_sync_allgone";
-    remove("/tmp/dbmem_test_sync_allgone/x.md");
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_sync_allgone";
+    remove(TEST_TMP_DIR "/dbmem_test_sync_allgone/x.md");
     rmdir_p(test_dir);
     mkdir_p(test_dir);  // empty directory
 
     // Insert fake entries pointing to files that don't exist
-    int rc = insert_fake_content(db, 1001, "/tmp/dbmem_test_sync_allgone/a.md", "ctx", 4);
+    int rc = insert_fake_content(db, 1001, TEST_TMP_DIR "/dbmem_test_sync_allgone/a.md", "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
-    rc = insert_fake_content(db, 1002, "/tmp/dbmem_test_sync_allgone/b.md", "ctx", 4);
+    rc = insert_fake_content(db, 1002, TEST_TMP_DIR "/dbmem_test_sync_allgone/b.md", "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
-    rc = insert_fake_content(db, 1003, "/tmp/dbmem_test_sync_allgone/c.md", "ctx", 4);
+    rc = insert_fake_content(db, 1003, TEST_TMP_DIR "/dbmem_test_sync_allgone/c.md", "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Also insert vault entries to verify cascade delete
@@ -1930,7 +1930,7 @@ TEST(sqlite_sync_directory_removes_all_deleted) {
 
     // Sync — all files gone, all entries should be removed
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_add_directory('/tmp/dbmem_test_sync_allgone');", &result);
+    rc = exec_get_int(db, "SELECT memory_add_directory('" TEST_TMP_DIR "/dbmem_test_sync_allgone');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
@@ -1951,8 +1951,8 @@ TEST(sqlite_sync_directory_skips_unchanged) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
 
-    const char *test_dir = "/tmp/dbmem_test_sync_skip";
-    const char *file = "/tmp/dbmem_test_sync_skip/note.md";
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_sync_skip";
+    const char *file = TEST_TMP_DIR "/dbmem_test_sync_skip/note.md";
     const char *content = "# My Note\nSome content.";
 
     remove(file);
@@ -1967,7 +1967,7 @@ TEST(sqlite_sync_directory_skips_unchanged) {
 
     // Sync — file exists with matching hash, should be skipped
     sqlite3_int64 result;
-    rc = exec_get_int(db, "SELECT memory_add_directory('/tmp/dbmem_test_sync_skip', 'notes');", &result);
+    rc = exec_get_int(db, "SELECT memory_add_directory('" TEST_TMP_DIR "/dbmem_test_sync_skip', 'notes');", &result);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Entry still exists unchanged (no duplication)
