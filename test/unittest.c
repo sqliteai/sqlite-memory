@@ -389,12 +389,34 @@ TEST(dbmem_parse_mdx_keeps_import_export_prose_and_indented_code) {
 }
 
 TEST(dbmem_parse_mdx_real_docs_file) {
-    const char *path = "/Users/marco/SQLiteCloud/website/docs-website/content/docs/sqlite-cloud/multi-code-example.mdx";
-    if (!dbmem_file_exists(path)) return;
-
-    int64_t len = 0;
-    char *input = dbmem_file_read(path, &len);
-    ASSERT(input != NULL);
+    const char *input =
+        "---\n"
+        "title: Multi Code Component Examples\n"
+        "description: Multi Code Component Examples\n"
+        "slug: multicode\n"
+        "---\n"
+        "import MultiCode from '@commons-components/Code/MultiCode.astro';\n"
+        "\n"
+        "In this examples, we will show how to use the `MultiCode` component:\n"
+        "\n"
+        "---\n"
+        "## First example\n"
+        "\n"
+        "export const WebliteSourceCode = `<script>\n"
+        "  async function searchData(event) {\n"
+        "    const query = document.getElementById('query').value;\n"
+        "  }\n"
+        "</script>`;\n"
+        "\n"
+        "export const codeExamplesOne = [\n"
+        "    {\n"
+        "        sliderItem: \"Web\",\n"
+        "        codeLines: WebliteSourceCode,\n"
+        "        lang: \"html\",\n"
+        "    }\n"
+        "];\n"
+        "\n"
+        "<MultiCode id=\"first\" copyCode={true} codeItems={codeExamplesOne} />\n";
 
     dbmem_parse_settings settings = default_settings();
     settings.mdx_mode = true;
@@ -403,7 +425,7 @@ TEST(dbmem_parse_mdx_real_docs_file) {
     settings.callback = test_callback;
     settings.xdata = &ctx;
 
-    int rc = dbmem_parse(input, (size_t)len, &settings);
+    int rc = dbmem_parse(input, strlen(input), &settings);
     ASSERT_EQ(rc, 0);
     ASSERT(ctx.count >= 1);
     ASSERT(test_ctx_contains(&ctx, "Multi Code Component Examples"));
@@ -412,7 +434,6 @@ TEST(dbmem_parse_mdx_real_docs_file) {
     ASSERT(!test_ctx_contains(&ctx, "WebliteSourceCode"));
     ASSERT(!test_ctx_contains(&ctx, "codeExamplesOne"));
 
-    dbmemory_free(input);
     free_test_ctx(&ctx);
 }
 
@@ -2038,10 +2059,11 @@ TEST(sqlite_sync_directory_removes_deleted) {
 
     const char *test_dir = TEST_TMP_DIR "/dbmem_test_sync_del";
     const char *file_keep = TEST_TMP_DIR "/dbmem_test_sync_del/keep.md";
+    const char *file_gone = TEST_TMP_DIR "/dbmem_test_sync_del/gone.md";
 
     // Clean up
     remove(file_keep);
-    remove(TEST_TMP_DIR "/dbmem_test_sync_del/gone.md");
+    remove(file_gone);
     rmdir_p(test_dir);
 
     // Create directory with one file
@@ -2059,7 +2081,7 @@ TEST(sqlite_sync_directory_removes_deleted) {
     int rc = insert_fake_content(db, keep_hash, file_keep, NULL, len);
     ASSERT_EQ(rc, SQLITE_OK);
 
-    rc = insert_fake_content(db, 99999, TEST_TMP_DIR "/dbmem_test_sync_del/gone.md", NULL, 4);
+    rc = insert_fake_content(db, 99999, file_gone, NULL, 4);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Verify 2 entries before sync
@@ -2094,16 +2116,20 @@ TEST(sqlite_sync_directory_removes_all_deleted) {
     ASSERT(db != NULL);
 
     const char *test_dir = TEST_TMP_DIR "/dbmem_test_sync_allgone";
+    const char *file_a = TEST_TMP_DIR "/dbmem_test_sync_allgone/a.md";
+    const char *file_b = TEST_TMP_DIR "/dbmem_test_sync_allgone/b.md";
+    const char *file_c = TEST_TMP_DIR "/dbmem_test_sync_allgone/c.md";
+
     remove(TEST_TMP_DIR "/dbmem_test_sync_allgone/x.md");
     rmdir_p(test_dir);
     mkdir_p(test_dir);  // empty directory
 
     // Insert fake entries pointing to files that don't exist
-    int rc = insert_fake_content(db, 1001, TEST_TMP_DIR "/dbmem_test_sync_allgone/a.md", "ctx", 4);
+    int rc = insert_fake_content(db, 1001, file_a, "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
-    rc = insert_fake_content(db, 1002, TEST_TMP_DIR "/dbmem_test_sync_allgone/b.md", "ctx", 4);
+    rc = insert_fake_content(db, 1002, file_b, "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
-    rc = insert_fake_content(db, 1003, TEST_TMP_DIR "/dbmem_test_sync_allgone/c.md", "ctx", 4);
+    rc = insert_fake_content(db, 1003, file_c, "ctx", 4);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Also insert vault entries to verify cascade delete

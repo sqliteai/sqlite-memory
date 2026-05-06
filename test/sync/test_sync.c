@@ -22,12 +22,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include "sqlite-memory.h"
 
+#ifdef _WIN32
+#include <io.h>
+#define unlink_p(path) _unlink(path)
+#ifndef TEST_TMP_DIR
+#define TEST_TMP_DIR "build"
+#endif
+#else
+#include <unistd.h>
+#define unlink_p(path) unlink(path)
+#ifndef TEST_TMP_DIR
+#define TEST_TMP_DIR "/tmp"
+#endif
+#endif
+
 // Temporary database files (cleaned up at start and end)
-#define AGENT_A_DB "/tmp/agent_a_memory_test.db"
-#define AGENT_B_DB "/tmp/agent_b_memory_test.db"
+#define AGENT_A_DB TEST_TMP_DIR "/agent_a_memory_test.db"
+#define AGENT_B_DB TEST_TMP_DIR "/agent_b_memory_test.db"
 
 // ============================================================================
 // Agent A content: James Webb Space Telescope (context: "space")
@@ -530,8 +543,8 @@ int main(void) {
     }
 
     // Clean up stale databases from previous runs
-    unlink(AGENT_A_DB);
-    unlink(AGENT_B_DB);
+    unlink_p(AGENT_A_DB);
+    unlink_p(AGENT_B_DB);
 
     printf("\nSync integration test: JWST (Agent A) + Great Barrier Reef (Agent B)\n");
     printf("=======================================================================\n\n");
@@ -566,8 +579,8 @@ int main(void) {
     // Cleanup
     if (db_a) sqlite3_close(db_a);
     if (db_b) sqlite3_close(db_b);
-    unlink(AGENT_A_DB);
-    unlink(AGENT_B_DB);
+    unlink_p(AGENT_A_DB);
+    unlink_p(AGENT_B_DB);
 
     printf("\n=== Sync Test Results ===\n");
     printf("Tests run:    %d\n", tests_run);
