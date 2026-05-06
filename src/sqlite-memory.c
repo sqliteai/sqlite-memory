@@ -1456,6 +1456,7 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
     settings.overlay_tokens = ctx->overlay_tokens;
     settings.skip_semantic = ctx->skip_semantic;
     settings.skip_html = ctx->skip_html;
+    settings.mdx_mode = (ctx->path && dbmem_file_has_extension(ctx->path, "mdx"));
 
     sqlite3 *db = ctx->db;
     int rc = dbmem_database_begin_transaction(db);

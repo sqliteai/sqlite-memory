@@ -604,6 +604,11 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
         }
     }
 
+    // Some providers do not return output_dimension; fallback to embedding array length.
+    if (n_embd == 0 && emb_count > 0) {
+        n_embd = (int)emb_count;
+    }
+
     if (emb_start < 0 || emb_count == 0 || n_embd == 0) {
         dbmem_context_set_error(engine->context, "Missing embedding data in API response");
         return -1;

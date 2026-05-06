@@ -20,6 +20,7 @@ typedef struct {
     size_t      chars_per_token;        // estimated number of characters per token
     bool        skip_semantic;          // if true, do not semantically parse MD file
     bool        skip_html;              // if true, remove html tags
+    bool        mdx_mode;               // if true, strip MDX ESM and expressions
 } dbmem_parse_settings;
 
 int dbmem_parse (const char *md, size_t md_len, dbmem_parse_settings *settings);

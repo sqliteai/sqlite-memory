@@ -21,6 +21,7 @@
 #include "dbmem-utils.h"
 #include "md4c.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -66,10 +67,19 @@ typedef struct {
     size_t      wp;             // Write position in buffer
     const char *line_end;       // End of current line
     bool        skip_html;      // Whether to skip HTML tags
+    bool        mdx_mode;       // Whether to strip MDX-specific syntax
     int         in_html_tag;    // Currently inside multi-line HTML tag
     int         in_fenced_code; // Currently inside fenced code block
     char        fence_char;     // Fence character (` or ~)
     int         fence_width;    // Number of fence characters
+    int         in_mdx_expr;    // Currently inside a multi-line MDX expression
+    int         mdx_expr_depth; // Nested brace depth for MDX expressions
+    char        mdx_expr_quote; // Active quote inside MDX expression
+    int         mdx_expr_block_comment;
+    int         in_mdx_esm;     // Currently skipping a multi-line ESM statement
+    int         mdx_esm_depth;  // Nested delimiter depth for ESM statements
+    char        mdx_esm_quote;  // Active quote inside ESM statement
+    int         mdx_esm_block_comment;
 } strip_ctx_t;
 
 // MARK: - Helpers -
@@ -160,6 +170,255 @@ static const char *find_bracket_end (const char *start, const char *end) {
 static const char *skip_until (const char *p, const char *end, char c) {
     while (p < end && *p != c) ++p;
     return (p < end) ? p + 1 : p;
+}
+
+static const char *skip_spaces_tabs (const char *p, const char *end) {
+    while (p < end && (*p == ' ' || *p == '\t')) ++p;
+    return p;
+}
+
+static int is_ident_continue (char c) {
+    return (isalnum((unsigned char)c) || c == '_' || c == '$');
+}
+
+static int starts_keyword (const char *p, const char *end, const char *kw) {
+    size_t n = strlen(kw);
+    if ((size_t)(end - p) < n) return 0;
+    if (strncmp(p, kw, n) != 0) return 0;
+    return (p + n >= end || !is_ident_continue(p[n]));
+}
+
+static const char *skip_identifier (const char *p, const char *end) {
+    if (p >= end || !is_ident_continue(*p)) return NULL;
+    while (p < end && is_ident_continue(*p)) ++p;
+    return p;
+}
+
+static const char *mdx_top_level_start (const char *p, const char *end) {
+    int spaces = 0;
+    while (p < end && *p == ' ') { ++p; ++spaces; }
+    if (spaces > 3 || (p < end && *p == '\t')) return NULL;
+    return p;
+}
+
+static int mdx_has_from_keyword (const char *p, const char *end) {
+    char quote = 0;
+    int in_block_comment = 0;
+
+    while (p < end) {
+        char c = *p;
+
+        if (quote) {
+            if (c == '\\' && p + 1 < end) {
+                p += 2;
+                continue;
+            }
+            if (c == quote) quote = 0;
+            ++p;
+            continue;
+        }
+
+        if (in_block_comment) {
+            if (c == '*' && p + 1 < end && p[1] == '/') {
+                in_block_comment = 0;
+                p += 2;
+                continue;
+            }
+            ++p;
+            continue;
+        }
+
+        if (c == '/' && p + 1 < end) {
+            if (p[1] == '/') break;
+            if (p[1] == '*') {
+                in_block_comment = 1;
+                p += 2;
+                continue;
+            }
+        }
+
+        if (c == '\'' || c == '"' || c == '`') {
+            quote = c;
+            ++p;
+            continue;
+        }
+
+        if (starts_keyword(p, end, "from")) return 1;
+        ++p;
+    }
+
+    return 0;
+}
+
+static int mdx_line_starts_esm (const char *p, const char *end) {
+    p = mdx_top_level_start(p, end);
+    if (!p) return 0;
+
+    if (starts_keyword(p, end, "import")) {
+        p += strlen("import");
+        if (p >= end || (*p != ' ' && *p != '\t')) return 0;
+        p = skip_spaces_tabs(p, end);
+        if (p < end && (*p == '\'' || *p == '"')) return 1;
+        if (p >= end) return 0;
+        if (*p == '{' || *p == '*') return mdx_has_from_keyword(p, end);
+
+        const char *ident_end = skip_identifier(p, end);
+        if (!ident_end) return 0;
+
+        if ((size_t)(ident_end - p) == 4 && strncmp(p, "type", 4) == 0) {
+            p = skip_spaces_tabs(ident_end, end);
+            if (p < end && (*p == '{' || *p == '*')) return mdx_has_from_keyword(p, end);
+            ident_end = skip_identifier(p, end);
+            if (!ident_end) return 0;
+        }
+
+        p = skip_spaces_tabs(ident_end, end);
+        if (starts_keyword(p, end, "from")) return 1;
+        if (p < end && *p == ',') return mdx_has_from_keyword(p + 1, end);
+        return 0;
+    }
+
+    if (starts_keyword(p, end, "export")) {
+        p += strlen("export");
+        if (p >= end || (*p != ' ' && *p != '\t')) return 0;
+        p = skip_spaces_tabs(p, end);
+        if (p >= end) return 0;
+        if (*p == '{' || *p == '*') return 1;
+        return starts_keyword(p, end, "const") ||
+               starts_keyword(p, end, "let") ||
+               starts_keyword(p, end, "var") ||
+               starts_keyword(p, end, "function") ||
+               starts_keyword(p, end, "class") ||
+               starts_keyword(p, end, "default") ||
+               starts_keyword(p, end, "async") ||
+               starts_keyword(p, end, "type") ||
+               starts_keyword(p, end, "interface") ||
+               starts_keyword(p, end, "enum");
+    }
+
+    return 0;
+}
+
+static int mdx_update_esm_state (strip_ctx_t *ctx, const char *p, const char *end) {
+    int saw_semicolon = 0;
+
+    while (p < end) {
+        char c = *p;
+
+        if (ctx->mdx_esm_quote) {
+            if (c == '\\' && p + 1 < end) {
+                p += 2;
+                continue;
+            }
+            if (c == ctx->mdx_esm_quote) ctx->mdx_esm_quote = 0;
+            ++p;
+            continue;
+        }
+
+        if (ctx->mdx_esm_block_comment) {
+            if (c == '*' && p + 1 < end && p[1] == '/') {
+                ctx->mdx_esm_block_comment = 0;
+                p += 2;
+                continue;
+            }
+            ++p;
+            continue;
+        }
+
+        if (c == '/' && p + 1 < end) {
+            if (p[1] == '/') break;
+            if (p[1] == '*') {
+                ctx->mdx_esm_block_comment = 1;
+                p += 2;
+                continue;
+            }
+        }
+
+        if (c == '\'' || c == '"' || c == '`') {
+            ctx->mdx_esm_quote = c;
+            ++p;
+            continue;
+        }
+
+        if (c == '(' || c == '[' || c == '{') {
+            ctx->mdx_esm_depth++;
+        } else if (c == ')' || c == ']' || c == '}') {
+            if (ctx->mdx_esm_depth > 0) ctx->mdx_esm_depth--;
+        } else if (c == ';' && ctx->mdx_esm_depth == 0) {
+            saw_semicolon = 1;
+        }
+
+        ++p;
+    }
+
+    if (ctx->mdx_esm_quote || ctx->mdx_esm_block_comment || ctx->mdx_esm_depth > 0) return 0;
+    return saw_semicolon || ctx->mdx_esm_depth == 0;
+}
+
+static const char *mdx_skip_expression (strip_ctx_t *ctx, const char *p, const char *end) {
+    if (!ctx->in_mdx_expr) {
+        ctx->in_mdx_expr = 1;
+        ctx->mdx_expr_depth = 1;
+        ctx->mdx_expr_quote = 0;
+        ctx->mdx_expr_block_comment = 0;
+        ++p;
+    }
+
+    while (p < end) {
+        char c = *p;
+
+        if (ctx->mdx_expr_quote) {
+            if (c == '\\' && p + 1 < end) {
+                p += 2;
+                continue;
+            }
+            if (c == ctx->mdx_expr_quote) ctx->mdx_expr_quote = 0;
+            ++p;
+            continue;
+        }
+
+        if (ctx->mdx_expr_block_comment) {
+            if (c == '*' && p + 1 < end && p[1] == '/') {
+                ctx->mdx_expr_block_comment = 0;
+                p += 2;
+                continue;
+            }
+            ++p;
+            continue;
+        }
+
+        if (c == '/' && p + 1 < end) {
+            if (p[1] == '/') break;
+            if (p[1] == '*') {
+                ctx->mdx_expr_block_comment = 1;
+                p += 2;
+                continue;
+            }
+        }
+
+        if (c == '\'' || c == '"' || c == '`') {
+            ctx->mdx_expr_quote = c;
+            ++p;
+            continue;
+        }
+
+        if (c == '{') {
+            ctx->mdx_expr_depth++;
+        } else if (c == '}') {
+            ctx->mdx_expr_depth--;
+            ++p;
+            if (ctx->mdx_expr_depth <= 0) {
+                ctx->in_mdx_expr = 0;
+                ctx->mdx_expr_depth = 0;
+                return p;
+            }
+            continue;
+        }
+
+        ++p;
+    }
+
+    return p;
 }
 
 // Check if line starts a fenced code block. Returns fence width (0 if not a fence).
@@ -325,6 +584,25 @@ static void process_inline (strip_ctx_t *ctx, const char *start, const char *end
     const char *p = start;
 
     while (p < end) {
+        // Continue skipping a multi-line MDX expression.
+        if (ctx->mdx_mode && ctx->in_mdx_expr) {
+            p = mdx_skip_expression(ctx, p, end);
+            continue;
+        }
+
+        // Escaped opening braces are literal text in MDX.
+        if (ctx->mdx_mode && *p == '\\' && p + 1 < end && p[1] == '{') {
+            ctx->buf[ctx->wp++] = '{';
+            p += 2;
+            continue;
+        }
+
+        // MDX expression: remove the JavaScript expression but keep nearby text.
+        if (ctx->mdx_mode && *p == '{') {
+            p = mdx_skip_expression(ctx, p, end);
+            continue;
+        }
+
         // HTML tags
         if (ctx->skip_html && *p == '<') {
             const char *gt = p + 1;
@@ -387,7 +665,7 @@ static void process_inline (strip_ctx_t *ctx, const char *start, const char *end
 }
 
 // Main markdown stripping function
-static char *strip_markdown (const char *src, size_t len, size_t *out_len, bool skip_html) {
+static char *strip_markdown (const char *src, size_t len, size_t *out_len, bool skip_html, bool mdx_mode) {
     char *buf = (char *)dbmemory_alloc(len + 1);
     if (!buf) return NULL;
 
@@ -395,10 +673,19 @@ static char *strip_markdown (const char *src, size_t len, size_t *out_len, bool 
         .buf = buf,
         .wp = 0,
         .skip_html = skip_html,
+        .mdx_mode = mdx_mode,
         .in_html_tag = 0,
         .in_fenced_code = 0,
         .fence_char = 0,
-        .fence_width = 0
+        .fence_width = 0,
+        .in_mdx_expr = 0,
+        .mdx_expr_depth = 0,
+        .mdx_expr_quote = 0,
+        .mdx_expr_block_comment = 0,
+        .in_mdx_esm = 0,
+        .mdx_esm_depth = 0,
+        .mdx_esm_quote = 0,
+        .mdx_esm_block_comment = 0
     };
 
     const char *p = src;
@@ -449,6 +736,21 @@ static char *strip_markdown (const char *src, size_t len, size_t *out_len, bool 
             buf[ctx.wp++] = '\n';
             p = (nl < end) ? nl + 1 : nl;
             continue;
+        }
+
+        // MDX top-level ESM (import/export) is scaffolding, not searchable prose.
+        if (ctx.mdx_mode) {
+            if (ctx.in_mdx_esm) {
+                if (mdx_update_esm_state(&ctx, p, line_end)) ctx.in_mdx_esm = 0;
+                p = (nl < end) ? nl + 1 : nl;
+                continue;
+            }
+
+            if (mdx_line_starts_esm(p, line_end)) {
+                ctx.in_mdx_esm = !mdx_update_esm_state(&ctx, p, line_end);
+                p = (nl < end) ? nl + 1 : nl;
+                continue;
+            }
         }
 
         // Blank lines
@@ -630,10 +932,10 @@ static int parse_sections (const char *buffer, size_t buffer_size, bool skip_sem
 }
 
 // Strip markdown from all sections
-static int strip_sections (parse_ctx_t *ctx, const char *buffer, bool skip_html) {
+static int strip_sections (parse_ctx_t *ctx, const char *buffer, bool skip_html, bool mdx_mode) {
     for (size_t i = 0; i < ctx->sec_count; i++) {
         section_t *s = &ctx->sections[i];
-        s->text = strip_markdown(buffer + s->start, s->end - s->start, &s->text_len, skip_html);
+        s->text = strip_markdown(buffer + s->start, s->end - s->start, &s->text_len, skip_html, mdx_mode);
         if (!s->text) {
             // Free previously allocated texts and set to NULL to avoid double-free
             for (size_t j = 0; j < i; j++) {
@@ -761,7 +1063,7 @@ int dbmem_parse (const char *md, size_t md_len, dbmem_parse_settings *settings) 
     }
 
     // 2. Strip markdown from sections
-    if (strip_sections(&ctx, md, settings->skip_html) != 0) {
+    if (strip_sections(&ctx, md, settings->skip_html, settings->mdx_mode) != 0) {
         free_sections(&ctx);
         return -1;
     }

@@ -136,6 +136,13 @@ static void free_test_ctx(test_ctx_t *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
+static int test_ctx_contains(test_ctx_t *ctx, const char *needle) {
+    for (size_t i = 0; i < ctx->count; i++) {
+        if (strstr(ctx->chunks[i], needle) != NULL) return 1;
+    }
+    return 0;
+}
+
 // ============================================================================
 // dbmem_parse Tests
 // ============================================================================
@@ -284,6 +291,128 @@ TEST(dbmem_parse_preserves_html) {
     ASSERT_EQ(ctx.count, 1);
     ASSERT_STR_EQ(ctx.chunks[0], "Before <div>content</div> after");
 
+    free_test_ctx(&ctx);
+}
+
+TEST(dbmem_parse_mdx_strips_esm_and_expressions) {
+    const char *input =
+        "import Widget from './Widget';\n"
+        "export const metadata = {\n"
+        "  title: 'Hidden title',\n"
+        "  description: 'Hidden description'\n"
+        "};\n"
+        "\n"
+        "# Hello {user.name}\n"
+        "\n"
+        "Visible <Widget prop={metadata}>inside</Widget> text.\n"
+        "{items.map((item) => (\n"
+        "  <span>{item.label}</span>\n"
+        "))}\n"
+        "After expression.\n";
+    dbmem_parse_settings settings = default_settings();
+    settings.mdx_mode = true;
+    settings.overlay_tokens = 0;
+    test_ctx_t ctx = {0};
+    settings.callback = test_callback;
+    settings.xdata = &ctx;
+
+    int rc = dbmem_parse(input, strlen(input), &settings);
+    ASSERT_EQ(rc, 0);
+    ASSERT(ctx.count >= 1);
+    ASSERT(test_ctx_contains(&ctx, "Hello"));
+    ASSERT(test_ctx_contains(&ctx, "Visible inside text."));
+    ASSERT(test_ctx_contains(&ctx, "After expression."));
+    ASSERT(!test_ctx_contains(&ctx, "Widget from"));
+    ASSERT(!test_ctx_contains(&ctx, "Hidden title"));
+    ASSERT(!test_ctx_contains(&ctx, "user.name"));
+    ASSERT(!test_ctx_contains(&ctx, "items.map"));
+    ASSERT(!test_ctx_contains(&ctx, "item.label"));
+
+    free_test_ctx(&ctx);
+}
+
+TEST(dbmem_parse_mdx_preserves_fenced_code) {
+    const char *input =
+        "Before\n"
+        "```js\n"
+        "import Widget from './Widget';\n"
+        "const node = <Widget enabled={true} />;\n"
+        "```\n"
+        "After {ignoredExpression}\n";
+    dbmem_parse_settings settings = default_settings();
+    settings.mdx_mode = true;
+    test_ctx_t ctx = {0};
+    settings.callback = test_callback;
+    settings.xdata = &ctx;
+
+    int rc = dbmem_parse(input, strlen(input), &settings);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(ctx.count, 1);
+    ASSERT(strstr(ctx.chunks[0], "Before") != NULL);
+    ASSERT(strstr(ctx.chunks[0], "import Widget from './Widget';") != NULL);
+    ASSERT(strstr(ctx.chunks[0], "const node = <Widget enabled={true} />;") != NULL);
+    ASSERT(strstr(ctx.chunks[0], "After") != NULL);
+    ASSERT(strstr(ctx.chunks[0], "ignoredExpression") == NULL);
+
+    free_test_ctx(&ctx);
+}
+
+TEST(dbmem_parse_mdx_keeps_import_export_prose_and_indented_code) {
+    const char *input =
+        "# Visible\n"
+        "import a database from the dashboard.\n"
+        "export data from SQLite Cloud when needed.\n"
+        "\n"
+        "    import sqlitecloud\n"
+        "    export default App\n"
+        "\n"
+        "import Real from './Real';\n"
+        "export const hidden = 'not searchable';\n";
+    dbmem_parse_settings settings = default_settings();
+    settings.mdx_mode = true;
+    settings.overlay_tokens = 0;
+    test_ctx_t ctx = {0};
+    settings.callback = test_callback;
+    settings.xdata = &ctx;
+
+    int rc = dbmem_parse(input, strlen(input), &settings);
+    ASSERT_EQ(rc, 0);
+    ASSERT(ctx.count >= 1);
+    ASSERT(test_ctx_contains(&ctx, "import a database from the dashboard."));
+    ASSERT(test_ctx_contains(&ctx, "export data from SQLite Cloud when needed."));
+    ASSERT(test_ctx_contains(&ctx, "import sqlitecloud"));
+    ASSERT(test_ctx_contains(&ctx, "export default App"));
+    ASSERT(!test_ctx_contains(&ctx, "Real from"));
+    ASSERT(!test_ctx_contains(&ctx, "not searchable"));
+
+    free_test_ctx(&ctx);
+}
+
+TEST(dbmem_parse_mdx_real_docs_file) {
+    const char *path = "/Users/marco/SQLiteCloud/website/docs-website/content/docs/sqlite-cloud/multi-code-example.mdx";
+    if (!dbmem_file_exists(path)) return;
+
+    int64_t len = 0;
+    char *input = dbmem_file_read(path, &len);
+    ASSERT(input != NULL);
+
+    dbmem_parse_settings settings = default_settings();
+    settings.mdx_mode = true;
+    settings.overlay_tokens = 0;
+    test_ctx_t ctx = {0};
+    settings.callback = test_callback;
+    settings.xdata = &ctx;
+
+    int rc = dbmem_parse(input, (size_t)len, &settings);
+    ASSERT_EQ(rc, 0);
+    ASSERT(ctx.count >= 1);
+    ASSERT(test_ctx_contains(&ctx, "Multi Code Component Examples"));
+    ASSERT(test_ctx_contains(&ctx, "First example"));
+    ASSERT(!test_ctx_contains(&ctx, "commons-components"));
+    ASSERT(!test_ctx_contains(&ctx, "WebliteSourceCode"));
+    ASSERT(!test_ctx_contains(&ctx, "codeExamplesOne"));
+
+    dbmemory_free(input);
     free_test_ctx(&ctx);
 }
 
@@ -2376,6 +2505,69 @@ static void dummy_free(void *engine, void *xdata) {
     free(engine);
 }
 
+TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *mdx_path = TEST_TMP_DIR "/dbmem_mdx_preprocess.mdx";
+    const char *md_path = TEST_TMP_DIR "/dbmem_mdx_preprocess.md";
+
+    remove_test_file(mdx_path);
+    remove_test_file(md_path);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    ASSERT_EQ(create_test_file(mdx_path,
+        "import Hidden from './hidden';\n"
+        "# MDX Visible\n"
+        "export const hidden = { label: 'Do not index' };\n"
+        "Shown <Hidden foo={hidden}>inner</Hidden> text {hidden.label}.\n"), 0);
+
+    char sql[512];
+    snprintf(sql, sizeof(sql), "SELECT memory_add_file('%s');", mdx_path);
+    rc = exec_get_int(db, sql, &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char content[2048];
+    rc = exec_get_text(db, "SELECT group_concat(content, '\n') FROM dbmem_vault_fts;", content, sizeof(content));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(content, "MDX Visible") != NULL);
+    ASSERT(strstr(content, "Shown inner text") != NULL);
+    ASSERT(strstr(content, "Hidden from") == NULL);
+    ASSERT(strstr(content, "Do not index") == NULL);
+    ASSERT(strstr(content, "hidden.label") == NULL);
+
+    rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    ASSERT_EQ(create_test_file(md_path,
+        "import Hidden from './hidden';\n"
+        "# MD Visible\n"
+        "export const hidden = { label: 'Do index in markdown' };\n"
+        "Shown <Hidden foo={hidden}>inner</Hidden> text {hidden.label}.\n"), 0);
+
+    snprintf(sql, sizeof(sql), "SELECT memory_add_file('%s');", md_path);
+    rc = exec_get_int(db, sql, &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_text(db, "SELECT group_concat(content, '\n') FROM dbmem_vault_fts;", content, sizeof(content));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(content, "MD Visible") != NULL);
+    ASSERT(strstr(content, "Hidden from") != NULL);
+    ASSERT(strstr(content, "Do index in markdown") != NULL);
+    ASSERT(strstr(content, "hidden.label") != NULL);
+
+    remove_test_file(mdx_path);
+    remove_test_file(md_path);
+    sqlite3_close(db);
+}
+
 static void *dummy_init_fail(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
     UNUSED_PARAM(model);
     UNUSED_PARAM(api_key);
@@ -2704,6 +2896,10 @@ int main(int argc, char *argv[]) {
     RUN_TEST(dbmem_parse_strips_blockquotes);
     RUN_TEST(dbmem_parse_strips_html);
     RUN_TEST(dbmem_parse_preserves_html);
+    RUN_TEST(dbmem_parse_mdx_strips_esm_and_expressions);
+    RUN_TEST(dbmem_parse_mdx_preserves_fenced_code);
+    RUN_TEST(dbmem_parse_mdx_keeps_import_export_prose_and_indented_code);
+    RUN_TEST(dbmem_parse_mdx_real_docs_file);
     RUN_TEST(dbmem_parse_inline_code);
     RUN_TEST(dbmem_parse_image);
     RUN_TEST(dbmem_parse_strikethrough);
@@ -2813,6 +3009,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_register);
     RUN_TEST(sqlite_custom_provider_set_model);
     RUN_TEST(sqlite_custom_provider_add_text);
+    RUN_TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files);
     RUN_TEST(sqlite_custom_provider_null_callbacks);
     RUN_TEST(sqlite_custom_provider_init_error);
     RUN_TEST(sqlite_custom_provider_apikey_passed);
