@@ -57,3 +57,5 @@ test/unittest.dSYM/Contents/Info.plist
 test/unittest.dSYM/Contents/Resources/DWARF/unittest
 test/unittest.dSYM/Contents/Resources/Relocations/aarch64/unittest.yml
 /build
+cli/.sqlmem.json
+cli/sqlmem

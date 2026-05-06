@@ -116,6 +116,22 @@ WHERE query = 'how do databases store information efficiently';
 -- └──────────────┴─────────────────────────────────────┴─────────┘
 ```
 
+### Command Line: sqlmem
+
+[`sqlmem`](cli/README.md) is the Go CLI for managing SQLite Memory projects from the terminal. It creates `.sqlmem.json`, manages the SQLite database, downloads and loads the SQLite extensions, configures embedding models, indexes Markdown sources, runs hybrid searches, watches files for changes, and exposes the memory tools over MCP.
+
+Use it when you want a project-level workflow around sqlite-memory without writing SQL directly:
+
+```bash
+cd cli
+make build
+./sqlmem init --model /path/to/embedding-model.gguf
+./sqlmem add ../docs
+./sqlmem search -q "how do I configure memory?"
+```
+
+See the [`sqlmem` README](cli/README.md) for installation, configuration, extension cache paths, PDF support, MCP, and command examples.
+
 ### Example: Building an AI Agent with Memory
 
 ```python
