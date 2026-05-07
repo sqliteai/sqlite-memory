@@ -770,6 +770,21 @@ FROM dbmem_content
 WHERE last_accessed > 0
 ORDER BY last_accessed DESC
 LIMIT 10;
+
+-- Tokens consumed and truncation per context
+-- (n_tokens / truncated were added in schema version 2)
+SELECT
+    COALESCE(c.context, '(none)') as context,
+    SUM(v.n_tokens) as tokens_processed,
+    SUM(v.truncated) as truncated_chunks
+FROM dbmem_vault v
+JOIN dbmem_content c ON c.hash = v.hash
+GROUP BY c.context;
+
+-- Chunks that the embedding model truncated on input
+SELECT hash, seq, length, n_tokens
+FROM dbmem_vault
+WHERE truncated = 1;
 ```
 
 ---
