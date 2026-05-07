@@ -638,7 +638,26 @@ TEST(memory_search_long_text_sections) {
         matched++;
     }
 
-    printf("(%d/%d sections retrieved) ", matched, n_cases);
+    // Surface aggregate per-chunk metadata for the underlying long-text
+    // corpus (one row in dbmem_content, multiple chunks in dbmem_vault).
+    char long_text_hash[DBMEM_HASH_STR_MAXLEN] = {0};
+    sqlite3_stmt *hstmt = NULL;
+    int hrc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'long-text' LIMIT 1;",
+        -1, &hstmt, NULL);
+    int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    if (hrc == SQLITE_OK && sqlite3_step(hstmt) == SQLITE_ROW) {
+        snprintf(long_text_hash, sizeof(long_text_hash), "%s",
+                 (const char *)sqlite3_column_text(hstmt, 0));
+        sqlite3_finalize(hstmt);
+        get_vault_metadata(long_text_hash, &chunk_count, &min_tokens,
+                           &min_truncated, &max_truncated);
+    } else {
+        if (hstmt) sqlite3_finalize(hstmt);
+    }
+
+    printf("(%d/%d sections retrieved; %d chunks min_n_tok=%d any_trunc=%d) ",
+           matched, n_cases, chunk_count, min_tokens, max_truncated);
 
     ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.7);");
 }
@@ -766,17 +785,24 @@ TEST(memory_search_under_token_limit) {
     ASSERT(long_chunk_bytes > 4500);
 
     int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    int short_n_tokens = 0, short_truncated = 0;
+    int long_n_tokens  = 0, long_truncated  = 0;
+
     rc = get_vault_metadata(short_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
     ASSERT(rc == SQLITE_OK);
     ASSERT(chunk_count == 1);
     ASSERT(min_tokens > 0);
     ASSERT(min_truncated == 0 && max_truncated == 0);
+    short_n_tokens = min_tokens;
+    short_truncated = max_truncated;
 
     rc = get_vault_metadata(long_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
     ASSERT(rc == SQLITE_OK);
     ASSERT(chunk_count == 1);
     ASSERT(min_tokens > 0);
     ASSERT(min_truncated == 0 && max_truncated == 0);
+    long_n_tokens = min_tokens;
+    long_truncated = max_truncated;
 
     // Same query as the truncation test; with the full chunk embedded we
     // expect both the short ref and the long chunk to surface in top-10.
@@ -805,8 +831,9 @@ TEST(memory_search_under_token_limit) {
     ASSERT(short_rank >= 0);
     ASSERT(long_rank >= 0);
 
-    printf("(%d bytes; short rank=%d score=%.3f, long rank=%d score=%.3f) ",
-           long_chunk_bytes, short_rank, short_score, long_rank, long_score);
+    printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d rank=%d score=%.3f) ",
+           short_n_tokens, short_truncated, short_rank, short_score,
+           long_chunk_bytes, long_n_tokens, long_truncated, long_rank, long_score);
 
     ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
     ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 400);");
@@ -845,11 +872,14 @@ TEST(memory_search_truncation_signature) {
     ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.0);");
 
     // Short reference (~50 tokens), fully embedded, entirely about the topic.
+    // Trailing sentence differs per test so memory_add_text's content-hash
+    // idempotency doesn't collapse this insert into a no-op of an earlier
+    // test's identical SHORT_REF.
     static const char *SHORT_REF =
         "Hydrothermal vents on the deep ocean floor sustain chemosynthetic "
         "microbial ecosystems independent of sunlight. Tubeworms and "
         "thermophilic archaea metabolize sulfur compounds emitted by the "
-        "vent fluids in total darkness.";
+        "vent fluids in total darkness. Truncation-signature reference.";
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
@@ -945,17 +975,24 @@ TEST(memory_search_truncation_signature) {
     ASSERT(long_chunk_bytes > 9000);
 
     int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    int short_n_tokens = 0, short_truncated = 0;
+    int long_n_tokens  = 0, long_truncated  = 0;
+
     rc = get_vault_metadata(short_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
     ASSERT(rc == SQLITE_OK);
     ASSERT(chunk_count == 1);
     ASSERT(min_tokens > 0);
     ASSERT(min_truncated == 0 && max_truncated == 0);
+    short_n_tokens = min_tokens;
+    short_truncated = max_truncated;
 
     rc = get_vault_metadata(long_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
     ASSERT(rc == SQLITE_OK);
     ASSERT(chunk_count == 1);
     ASSERT(min_tokens > 0);
     ASSERT(min_truncated == 1 && max_truncated == 1);
+    long_n_tokens = min_tokens;
+    long_truncated = max_truncated;
 
     // Query for the topic that appears throughout the short reference and
     // only in the *tail* of the long chunk. Paraphrased so any residual FTS
@@ -984,14 +1021,16 @@ TEST(memory_search_truncation_signature) {
 
     ASSERT(short_rank >= 0);
     if (long_rank == -1) {
-        printf("(short rank=%d score=%.3f, long absent from top-10) ",
-               short_rank, short_score);
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d absent from top-10) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated);
     } else {
         // With a fully-embedded long chunk we'd expect comparable rankings;
         // truncation pushes the long chunk strictly below the short ref.
         ASSERT(short_rank < long_rank);
-        printf("(short rank=%d score=%.3f, long rank=%d score=%.3f) ",
-               short_rank, short_score, long_rank, long_score);
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d rank=%d score=%.3f) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated, long_rank, long_score);
     }
 
     ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
@@ -1021,11 +1060,13 @@ TEST(memory_search_truncation_near_model_context) {
     ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.0);");
     ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.0);");
 
+    // Trailing sentence differs from the other tests' SHORT_REFs so the
+    // content-hash idempotency in memory_add_text doesn't collapse the insert.
     static const char *SHORT_REF =
         "Hydrothermal vents on the deep ocean floor sustain chemosynthetic "
         "microbial ecosystems independent of sunlight. Tubeworms and "
         "thermophilic archaea metabolize sulfur compounds emitted by the "
-        "vent fluids in total darkness.";
+        "vent fluids in total darkness. Near-context reference.";
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
@@ -1115,17 +1156,24 @@ TEST(memory_search_truncation_near_model_context) {
     ASSERT(long_chunk_bytes > 18000);
 
     int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    int short_n_tokens = 0, short_truncated = 0;
+    int long_n_tokens  = 0, long_truncated  = 0;
+
     rc = get_vault_metadata(short_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
     ASSERT(rc == SQLITE_OK);
     ASSERT(chunk_count == 1);
     ASSERT(min_tokens > 0);
     ASSERT(min_truncated == 0 && max_truncated == 0);
+    short_n_tokens = min_tokens;
+    short_truncated = max_truncated;
 
     rc = get_vault_metadata(long_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
     ASSERT(rc == SQLITE_OK);
     ASSERT(chunk_count == 1);
     ASSERT(min_tokens > 0);
     ASSERT(min_truncated == 1 && max_truncated == 1);
+    long_n_tokens = min_tokens;
+    long_truncated = max_truncated;
 
     rc = sqlite3_prepare_v2(db,
         "SELECT hash, ranking FROM memory_search("
@@ -1151,12 +1199,14 @@ TEST(memory_search_truncation_near_model_context) {
 
     ASSERT(short_rank >= 0);
     if (long_rank == -1) {
-        printf("(%d bytes; short rank=%d score=%.3f, long absent from top-10) ",
-               long_chunk_bytes, short_rank, short_score);
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d absent from top-10) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated);
     } else {
         ASSERT(short_rank < long_rank);
-        printf("(%d bytes; short rank=%d score=%.3f, long rank=%d score=%.3f) ",
-               long_chunk_bytes, short_rank, short_score, long_rank, long_score);
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d rank=%d score=%.3f) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated, long_rank, long_score);
     }
 
     ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
