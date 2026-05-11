@@ -1,3 +1,41 @@
+<div align="center">
+  <a href="https://sqlite.ai">
+    <img src="https://www.sqlite.ai/social/logo-ai.png" alt="SQLite AI" height="56">
+  </a>
+
+  <h1>SQLite-Memory</h1>
+  <p><strong>Persistent, searchable memory for AI agents.</strong><br>
+  Markdown-based memory with semantic search, hybrid retrieval, and offline-first sync between agents. Drop-in memory layer for any LLM workflow.</p>
+
+  <p>
+    <a href="https://dashboard.sqlitecloud.io/auth/sign-in"><strong>Free managed instance →</strong></a> ·
+    <a href="https://docs.sqlitecloud.io/docs/ai-overview">Docs</a> ·
+    <a href="https://sqlite.ai">Website</a> ·
+    <a href="https://blog.sqlite.ai">Blog</a>
+  </p>
+
+  <p>
+    <sub><strong>Data:</strong>
+    <a href="https://github.com/sqliteai/sqlite-vector">Vector</a> ·
+    <a href="https://github.com/sqliteai/sqlite-sync">Sync</a> ·
+    <a href="https://github.com/sqliteai/sqlite-columnar">Columnar</a> ·
+    <a href="https://github.com/sqliteai/sqlite-js">JS</a>
+    <br>
+    <strong>AI:</strong>
+    <a href="https://github.com/sqliteai/sqlite-ai">AI</a> ·
+    <a href="https://github.com/sqliteai/sqlite-agent">Agent</a> ·
+    <a href="https://github.com/sqliteai/sqlite-memory">Memory</a> ·
+    <a href="https://github.com/sqliteai/sqlite-mcp">MCP</a>
+    </sub>
+  </p>
+</div>
+
+<br>
+
+> **Multiple agents need shared memory?** SQLite-Memory syncs locally via CRDTs; pair it with **[SQLite Cloud](https://dashboard.sqlitecloud.io/auth/sign-in)** (or your own Postgres/Supabase) to coordinate memory across machines, users, and workers. Free tier available.
+
+---
+
 # SQLite Memory
 
 A SQLite extension that gives AI agents persistent, searchable memory, optimized for markdown content. Features hybrid semantic search (vector similarity + FTS5), markdown-aware chunking, and local embedding via llama.cpp.
@@ -333,19 +371,31 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-## Part of the SQLite AI Ecosystem
+## ☁️ Hosted version
 
-This project is part of the **SQLite AI** ecosystem, a collection of extensions that bring modern AI capabilities to the world's most widely deployed database. The goal is to make SQLite the default data and inference engine for Edge AI applications.
+Need to share agent memory across devices, users, or workers? **[SQLite Cloud](https://sqlite.ai)** is the managed backend for SQLite-Memory — sync memory across a fleet of agents with auth, ACL, and observability.
 
-Other projects in the ecosystem include:
+[**Start free →**](https://dashboard.sqlitecloud.io/auth/sign-in)
 
-- **[SQLite-AI](https://github.com/sqliteai/sqlite-ai)** - On-device inference and embedding generation directly inside SQLite.
-- **[SQLite-Memory](https://github.com/sqliteai/sqlite-memory)** - Markdown-based AI agent memory with semantic search.
-- **[SQLite-Vector](https://github.com/sqliteai/sqlite-vector)** - Ultra-efficient vector search for embeddings stored as BLOBs in standard SQLite tables.
-- **[SQLite-Sync](https://github.com/sqliteai/sqlite-sync)** - Local-first CRDT-based synchronization for seamless, conflict-free data sync and real-time collaboration across devices.
-- **[SQLite-Agent](https://github.com/sqliteai/sqlite-agent)** - Run autonomous AI agents directly from within SQLite databases.
-- **[SQLite-MCP](https://github.com/sqliteai/sqlite-mcp)** - Connect SQLite databases to MCP servers and invoke their tools.
-- **[SQLite-JS](https://github.com/sqliteai/sqlite-js)** - Create custom SQLite functions using JavaScript.
-- **[Liteparser](https://github.com/sqliteai/liteparser)** - A highly efficient and fully compliant SQLite SQL parser.
+---
 
-Learn more at **[SQLite AI](https://sqlite.ai)**.
+## Part of the SQLite AI stack
+
+SQLite-Memory is one piece of a larger ecosystem that turns SQLite into a runtime for intelligent, distributed data:
+
+**Data layer**
+- [sqlite-vector](https://github.com/sqliteai/sqlite-vector) — ANN vector search inside SQLite
+- [sqlite-sync](https://github.com/sqliteai/sqlite-sync) — Offline-first CRDT sync across devices
+- [sqlite-columnar](https://github.com/sqliteai/sqlite-columnar) — Column-oriented analytics for OLAP queries
+- [sqlite-js](https://github.com/sqliteai/sqlite-js) — Custom SQLite functions written in JavaScript
+
+**AI layer**
+- [sqlite-ai](https://github.com/sqliteai/sqlite-ai) — On-device LLM inference and embeddings
+- [sqlite-agent](https://github.com/sqliteai/sqlite-agent) — Autonomous AI agents running inside SQLite
+- [**sqlite-memory**](https://github.com/sqliteai/sqlite-memory) — Persistent, searchable memory for agents *(you are here)*
+- [sqlite-mcp](https://github.com/sqliteai/sqlite-mcp) — Call MCP tools directly from SQL queries
+
+**Managed platform**
+- [SQLite Cloud](https://sqlite.ai) — Hosted SQLite with sync, auth, edge functions, and analytics. [Free tier →](https://dashboard.sqlitecloud.io/auth/sign-in)
+
+Built by [SQLite AI](https://sqlite.ai). Questions? [Open a discussion](https://github.com/sqliteai/sqlite-memory/discussions) or [contact us](https://sqlite.ai/support).
