@@ -60,6 +60,9 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE      "embedding_cache"
 #define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES    "cache_max_entries"
 #define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE    "search_oversample"
+#define DBMEM_SETTINGS_KEY_SCHEMA_VERSION       "schema_version"
+
+#define DBMEM_SCHEMA_VERSION                    2
 
 // default values from https://docs.openclaw.ai/concepts/memory
 #define DEFAULT_CHARS_PER_TOKEN                 4       // Approximate number of characters per token (GPT ≈ 4, Claude ≈ 3.5)
@@ -358,6 +361,105 @@ cleanup:
 
 // MARK: - Database -
 
+static bool dbmem_database_column_exists (sqlite3 *db, const char *table, const char *column, int *out_rc) {
+    char sql[256];
+    snprintf(sql, sizeof(sql), "PRAGMA table_info(%s);", table);
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) {
+        if (out_rc) *out_rc = rc;
+        return false;
+    }
+
+    bool exists = false;
+    while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(vm, 1);
+        if (name && strcmp(name, column) == 0) {
+            exists = true;
+            break;
+        }
+    }
+
+    if (rc == SQLITE_DONE || rc == SQLITE_ROW) rc = SQLITE_OK;
+    sqlite3_finalize(vm);
+    if (out_rc) *out_rc = rc;
+    return exists;
+}
+
+static int dbmem_database_add_column_if_missing (sqlite3 *db, const char *table, const char *column, const char *alter_sql) {
+    int rc = SQLITE_OK;
+    if (dbmem_database_column_exists(db, table, column, &rc)) return SQLITE_OK;
+    if (rc != SQLITE_OK) return rc;
+    return sqlite3_exec(db, alter_sql, NULL, NULL, NULL);
+}
+
+static int dbmem_database_schema_version (sqlite3 *db, int *version) {
+    static const char *sql = "SELECT value FROM dbmem_settings WHERE key=?1 LIMIT 1;";
+
+    *version = 0;
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_text(vm, 1, DBMEM_SETTINGS_KEY_SCHEMA_VERSION, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_ROW) {
+        *version = sqlite3_column_int(vm, 0);
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    }
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_database_set_schema_version (sqlite3 *db, int version) {
+    return dbmem_settings_write_int(db, DBMEM_SETTINGS_KEY_SCHEMA_VERSION, version);
+}
+
+static int dbmem_database_migrate_v1_to_v2 (sqlite3 *db) {
+    int rc = dbmem_database_add_column_if_missing(db, "dbmem_vault", "n_tokens",
+        "ALTER TABLE dbmem_vault ADD COLUMN n_tokens INTEGER NOT NULL DEFAULT 0;");
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbmem_database_add_column_if_missing(db, "dbmem_vault", "truncated",
+        "ALTER TABLE dbmem_vault ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;");
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbmem_database_add_column_if_missing(db, "dbmem_cache", "n_tokens",
+        "ALTER TABLE dbmem_cache ADD COLUMN n_tokens INTEGER NOT NULL DEFAULT 0;");
+    if (rc != SQLITE_OK) return rc;
+
+    return dbmem_database_add_column_if_missing(db, "dbmem_cache", "truncated",
+        "ALTER TABLE dbmem_cache ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0;");
+}
+
+static int dbmem_database_migrate (sqlite3 *db) {
+    int version = 0;
+    int rc = dbmem_database_schema_version(db, &version);
+    if (rc != SQLITE_OK) return rc;
+
+    if (version > DBMEM_SCHEMA_VERSION) return SQLITE_MISMATCH;
+    if (version <= 0) version = 1;
+
+    if (version < 2) {
+        rc = dbmem_database_migrate_v1_to_v2(db);
+        if (rc != SQLITE_OK) return rc;
+        version = 2;
+        rc = dbmem_database_set_schema_version(db, version);
+        if (rc != SQLITE_OK) return rc;
+    }
+
+    if (version != DBMEM_SCHEMA_VERSION) return SQLITE_MISMATCH;
+    return SQLITE_OK;
+}
+
 static int dbmem_database_init (sqlite3 *db) {
     const char *sql = "CREATE TABLE IF NOT EXISTS dbmem_settings (key TEXT PRIMARY KEY, value TEXT);";
     int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
@@ -367,12 +469,15 @@ static int dbmem_database_init (sqlite3 *db) {
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash TEXT NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_vault (hash TEXT NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, n_tokens INTEGER NOT NULL DEFAULT 0, truncated INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hash, seq));";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
     
-    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));";
+    sql = "CREATE TABLE IF NOT EXISTS dbmem_cache (text_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, n_tokens INTEGER NOT NULL DEFAULT 0, truncated INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (text_hash, provider, model));";
     rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = dbmem_database_migrate(db);
     if (rc != SQLITE_OK) return rc;
 
     sql = "CREATE VIRTUAL TABLE IF NOT EXISTS dbmem_vault_fts USING fts5 (content, hash UNINDEXED, seq UNINDEXED, context UNINDEXED);";
@@ -495,7 +600,7 @@ cleanup:
 }
 
 static int dbmem_database_add_chunk (dbmem_context *ctx, embedding_result_t *result, size_t offset, size_t length, size_t index) {
-    static const char *sql = "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES (?1, ?2, ?3, ?4, ?5);";
+    static const char *sql = "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length, n_tokens, truncated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
     
     sqlite3_stmt *vm = NULL;
     int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
@@ -514,6 +619,12 @@ static int dbmem_database_add_chunk (dbmem_context *ctx, embedding_result_t *res
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_bind_int64(vm, 5, (sqlite3_int64)length);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_int(vm, 6, result->n_tokens);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_int(vm, 7, result->truncated ? 1 : 0);
     if (rc != SQLITE_OK) goto cleanup;
     
     rc = sqlite3_step(vm);
@@ -642,7 +753,7 @@ int dbmem_context_custom_compute (dbmem_context *ctx, const char *text, int text
     int rc = ctx->custom_provider.compute(ctx->custom_engine, text, text_len, ctx->custom_provider.xdata, &cr);
     if (rc != 0) return rc;
     result->n_tokens = cr.n_tokens;
-    result->n_tokens_truncated = cr.n_tokens_truncated;
+    result->truncated = cr.truncated;
     result->n_embd = cr.n_embd;
     result->embedding = cr.embedding;
     return 0;
@@ -1249,7 +1360,7 @@ cleanup:
 static void dbmem_dump_embeding (const embedding_result_t *result) {
     printf("{\n");
     printf("  \"n_tokens\": %d,\n", result->n_tokens);
-    printf("  \"n_tokens_truncated\": %d,\n", result->n_tokens_truncated);
+    printf("  \"truncated\": %s,\n", result->truncated ? "true" : "false");
     printf("  \"n_embd\": %d,\n", result->n_embd);
     printf("  \"embedding\": [");
 
@@ -1267,7 +1378,7 @@ static void dbmem_dump_embeding (const embedding_result_t *result) {
 // MARK: - Embedding Cache -
 
 static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embedding_result_t *result) {
-    static const char *sql = "SELECT embedding, dimension FROM dbmem_cache WHERE text_hash=?1 AND provider=?2 AND model=?3 LIMIT 1;";
+    static const char *sql = "SELECT embedding, dimension, n_tokens, truncated FROM dbmem_cache WHERE text_hash=?1 AND provider=?2 AND model=?3 LIMIT 1;";
 
     if (!ctx->provider || !ctx->model) return false;
 
@@ -1300,8 +1411,8 @@ static bool dbmem_cache_lookup (dbmem_context *ctx, uint64_t text_hash, embeddin
     memcpy(ctx->cache_buffer, blob, blob_bytes);
     result->embedding = ctx->cache_buffer;
     result->n_embd = dimension;
-    result->n_tokens = 0;
-    result->n_tokens_truncated = 0;
+    result->n_tokens = sqlite3_column_int(vm, 2);
+    result->truncated = sqlite3_column_int(vm, 3) != 0;
     found = true;
 
 cleanup:
@@ -1337,7 +1448,7 @@ cleanup:
 }
 
 static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const embedding_result_t *result) {
-    static const char *sql = "INSERT OR REPLACE INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES (?1, ?2, ?3, ?4, ?5);";
+    static const char *sql = "INSERT OR REPLACE INTO dbmem_cache (text_hash, provider, model, embedding, dimension, n_tokens, truncated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
 
     if (!ctx->provider || !ctx->model) return;
 
@@ -1350,6 +1461,8 @@ static void dbmem_cache_store (dbmem_context *ctx, uint64_t text_hash, const emb
     sqlite3_bind_text(vm, 3, ctx->model, -1, SQLITE_STATIC);
     sqlite3_bind_blob(vm, 4, result->embedding, result->n_embd * (int)sizeof(float), SQLITE_STATIC);
     sqlite3_bind_int(vm, 5, result->n_embd);
+    sqlite3_bind_int(vm, 6, result->n_tokens);
+    sqlite3_bind_int(vm, 7, result->truncated ? 1 : 0);
 
     sqlite3_step(vm);
 

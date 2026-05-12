@@ -561,7 +561,7 @@ ifeq ($(PLATFORM),windows)
 else
 	unzip -o $(CURL_ZIP) -d $(CURL_DIR)/src/.
 endif
-	cd $(CURL_SRC) && ./configure \
+	cd $(CURL_SRC) && env -u LDFLAGS -u CPPFLAGS -u CFLAGS -u LIBS ./configure \
 	--without-libpsl \
 	--disable-alt-svc \
 	--disable-ares \

@@ -17,7 +17,7 @@ typedef struct dbmem_remote_engine_t dbmem_remote_engine_t;
 // Embedding result structure (always one embedding per call)
 typedef struct {
     int      n_tokens;              // Number of tokens processed
-    int      n_tokens_truncated;    // Number of tokens truncated (0 if none)
+    bool     truncated;             // True when the input was truncated before embedding
     int      n_embd;                // Embedding dimension
     float    *embedding;            // Pointer to embedding (points to engine's buffer, do not free)
 } embedding_result_t;

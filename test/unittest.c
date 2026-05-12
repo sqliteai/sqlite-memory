@@ -1589,7 +1589,7 @@ TEST(sqlite_schema_has_timestamps) {
     ASSERT(db != NULL);
 
     // Check that schema includes created_at column
-    char sql[256];
+    char sql[512];
     int rc = exec_get_text(db,
         "SELECT sql FROM sqlite_master WHERE name='dbmem_content';",
         sql, sizeof(sql));
@@ -1603,12 +1603,75 @@ TEST(sqlite_schema_has_timestamps) {
         sql, sizeof(sql));
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(strstr(sql, "hash TEXT NOT NULL") != NULL);
+    ASSERT(strstr(sql, "n_tokens") != NULL);
+    ASSERT(strstr(sql, "truncated") != NULL);
 
     rc = exec_get_text(db,
         "SELECT sql FROM sqlite_master WHERE name='dbmem_cache';",
         sql, sizeof(sql));
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(strstr(sql, "text_hash TEXT NOT NULL") != NULL);
+    ASSERT(strstr(sql, "n_tokens") != NULL);
+    ASSERT(strstr(sql, "truncated") != NULL);
+
+    sqlite3_int64 schema_version = 0;
+    rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'schema_version';", &schema_version);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(schema_version, 2);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migrates_embedding_metadata) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "INSERT INTO dbmem_settings (key, value) VALUES ('schema_version', '1');"
+        "CREATE TABLE dbmem_vault (hash TEXT NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, PRIMARY KEY (hash, seq));"
+        "CREATE TABLE dbmem_cache (text_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, PRIMARY KEY (text_hash, provider, model));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM pragma_table_info('dbmem_vault') WHERE name = 'n_tokens';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM pragma_table_info('dbmem_vault') WHERE name = 'truncated';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM pragma_table_info('dbmem_cache') WHERE name = 'n_tokens';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM pragma_table_info('dbmem_cache') WHERE name = 'truncated';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES (printf('%016x', 900), 0, X'00000000', 0, 4);"
+        "INSERT INTO dbmem_cache (text_hash, provider, model, embedding, dimension) VALUES (printf('%016x', 901), 'dummy', 'model', X'00000000', 1);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_vault WHERE hash = printf('%016x', 900);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_cache WHERE text_hash = printf('%016x', 901);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'schema_version';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
 
     sqlite3_close(db);
 }
@@ -2115,9 +2178,15 @@ TEST(sqlite_sync_directory_skips_unchanged) {
     mkdir_p(test_dir);
     create_test_file(file, content);
 
-    // Compute the hash and pre-insert the entry
-    uint64_t hash = dbmem_hash_compute(content, strlen(content));
-    int rc = insert_fake_content(db, hash, file, "notes", (sqlite3_int64)strlen(content));
+    // Compute the hash from disk so Windows text-mode newline translation
+    // cannot make the pre-inserted hash differ from memory_add_directory().
+    int64_t len = 0;
+    char *buf = dbmem_file_read(file, &len);
+    ASSERT(buf != NULL);
+    uint64_t hash = dbmem_hash_compute(buf, (size_t)len);
+    dbmemory_free(buf);
+
+    int rc = insert_fake_content(db, hash, file, "notes", len);
     ASSERT_EQ(rc, SQLITE_OK);
 
     // Sync — file exists with matching hash, should be skipped
@@ -2178,7 +2247,7 @@ TEST(sqlite_cache_table_exists) {
     ASSERT(db != NULL);
 
     // Check that dbmem_cache table exists
-    char sql[256];
+    char sql[512];
     int rc = exec_get_text(db,
         "SELECT sql FROM sqlite_master WHERE name='dbmem_cache';",
         sql, sizeof(sql));
@@ -2189,6 +2258,8 @@ TEST(sqlite_cache_table_exists) {
     ASSERT(strstr(sql, "model") != NULL);
     ASSERT(strstr(sql, "embedding") != NULL);
     ASSERT(strstr(sql, "dimension") != NULL);
+    ASSERT(strstr(sql, "n_tokens") != NULL);
+    ASSERT(strstr(sql, "truncated") != NULL);
 
     sqlite3_close(db);
 }
@@ -2514,9 +2585,17 @@ static int dummy_compute(void *engine, const char *text, int text_len, void *xda
     dummy_engine_t *e = (dummy_engine_t *)engine;
     e->compute_count++;
     result->n_tokens = text_len / 4;
-    result->n_tokens_truncated = 0;
+    result->truncated = false;
     result->n_embd = e->dimension;
     result->embedding = e->embedding;
+    return 0;
+}
+
+static int truncated_dummy_compute(void *engine, const char *text, int text_len, void *xdata, dbmem_embedding_result_t *result) {
+    int rc = dummy_compute(engine, text, text_len, xdata, result);
+    if (rc != 0) return rc;
+    result->n_tokens = 3;
+    result->truncated = true;
     return 0;
 }
 
@@ -2665,6 +2744,87 @@ TEST(sqlite_custom_provider_add_text) {
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(result >= 1);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 7);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_cache LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 7);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_cache LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_text('Hello world, this is a test.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 7);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_persists_truncated_metadata) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = truncated_dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "truncdummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('truncdummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_text('This custom provider reports truncation.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 3);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_cache LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 3);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_cache LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_text('This custom provider reports truncation.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    rc = exec_get_int(db, "SELECT n_tokens FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 3);
+
+    rc = exec_get_int(db, "SELECT truncated FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
 
     sqlite3_close(db);
 }
@@ -2828,6 +2988,7 @@ static void tracking_free(void *engine, void *xdata) {
     free(engine);
 }
 
+#ifndef DBMEM_OMIT_REMOTE_ENGINE
 TEST(sqlite_set_model_releases_previous_engine_on_class_switch) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -2857,6 +3018,37 @@ TEST(sqlite_set_model_releases_previous_engine_on_class_switch) {
     sqlite3_close(db);
     ASSERT_EQ(state.free_count, 1);
 }
+#else
+TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_apikey('test-key');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    tracking_free_state_t state = {0};
+    dbmem_provider_t prov = { .init = tracking_init, .compute = tracking_compute, .free = tracking_free, .xdata = &state };
+    rc = sqlite3_memory_register_provider(db, "tracker", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_model('tracker', 'm1');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(state.free_count, 0);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_set_model('openai', 'text-embedding-3-small');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    ASSERT_EQ(state.free_count, 0);
+
+    sqlite3_close(db);
+    ASSERT_EQ(state.free_count, 1);
+}
+#endif
 
 #endif // TEST_SQLITE_EXTENSION
 
@@ -2957,6 +3149,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_delete_nonexistent);
     RUN_TEST(sqlite_memory_delete_context_nonexistent);
     RUN_TEST(sqlite_schema_has_timestamps);
+    RUN_TEST(sqlite_schema_migrates_embedding_metadata);
     RUN_TEST(sqlite_direct_insert_with_timestamp);
     RUN_TEST(sqlite_memory_delete_direct);
     RUN_TEST(sqlite_memory_delete_context_direct);
@@ -2997,12 +3190,17 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_register);
     RUN_TEST(sqlite_custom_provider_set_model);
     RUN_TEST(sqlite_custom_provider_add_text);
+    RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
     RUN_TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files);
     RUN_TEST(sqlite_custom_provider_null_callbacks);
     RUN_TEST(sqlite_custom_provider_init_error);
     RUN_TEST(sqlite_custom_provider_apikey_passed);
     RUN_TEST(sqlite_set_model_failed_reindex_preserves_existing_rows);
+#ifndef DBMEM_OMIT_REMOTE_ENGINE
     RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
+#else
+    RUN_TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine);
+#endif
 #endif
 
     printf("\n=== Results ===\n");

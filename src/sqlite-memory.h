@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define SQLITE_DBMEMORY_VERSION "1.1.0"
+#define SQLITE_DBMEMORY_VERSION "1.2.0"
 
 // public API
 SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi);
@@ -39,7 +39,7 @@ typedef struct dbmem_context dbmem_context;
 
 typedef struct {
     int      n_tokens;
-    int      n_tokens_truncated;
+    bool     truncated;
     int      n_embd;
     float    *embedding;          // Engine-owned buffer, valid until next call or free
 } dbmem_embedding_result_t;

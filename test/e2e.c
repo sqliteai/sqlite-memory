@@ -58,12 +58,13 @@ static int tests_failed = 0;
 
 #define TEST(name) static void test_##name(void)
 #define RUN_TEST(name) do { \
+    int _failed_before = tests_failed; \
     printf("  Running %s... ", #name); \
     fflush(stdout); \
     test_##name(); \
     tests_run++; \
     tests_passed++; \
-    printf("PASSED\n"); \
+    if (tests_failed == _failed_before) printf("PASSED\n"); \
 } while(0)
 
 #define ASSERT(cond) do { \
@@ -118,6 +119,33 @@ static void create_test_file(const char *path, const char *content) {
         fputs(content, f);
         fclose(f);
     }
+}
+
+static int get_vault_metadata(const char *hash, int *chunk_count, int *min_tokens, int *min_truncated, int *max_truncated) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT COUNT(*), COALESCE(MIN(n_tokens), 0), COALESCE(MIN(truncated), 0), COALESCE(MAX(truncated), 0) "
+        "FROM dbmem_vault WHERE hash = ?1;",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_bind_text(stmt, 1, hash, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        if (chunk_count) *chunk_count = sqlite3_column_int(stmt, 0);
+        if (min_tokens) *min_tokens = sqlite3_column_int(stmt, 1);
+        if (min_truncated) *min_truncated = sqlite3_column_int(stmt, 2);
+        if (max_truncated) *max_truncated = sqlite3_column_int(stmt, 3);
+        rc = SQLITE_OK;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
 }
 
 // ============================================================================
@@ -240,6 +268,24 @@ TEST(verify_embedding) {
 
     printf("(dim=%d, values verified) ", dim);
     sqlite3_finalize(stmt);
+}
+
+// Verify remote embedding metadata is persisted on the stored chunk.
+TEST(verify_embedding_metadata) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT n_tokens, truncated FROM dbmem_vault LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(sqlite3_step(stmt) == SQLITE_ROW);
+
+    int n_tokens = sqlite3_column_int(stmt, 0);
+    int truncated = sqlite3_column_int(stmt, 1);
+    sqlite3_finalize(stmt);
+
+    ASSERT(n_tokens > 0);
+    ASSERT(truncated == 0);
+    printf("(n_tokens=%d, truncated=%d) ", n_tokens, truncated);
 }
 
 // memory_add_text with context (triggers remote embedding)
@@ -425,6 +471,753 @@ TEST(memory_search_statement_reuse) {
 }
 
 // ============================================================================
+// Phase 4b: Long-text chunking + multi-section retrieval
+// ============================================================================
+
+// A long text with 4 clearly distinct sections, each tagged with a unique
+// anchor token so we can verify both (a) the chunker covers the whole text
+// and (b) section-specific queries retrieve the matching chunk.
+#define LONG_TEXT_ANCHOR_COOKING  "ZANZIBAR-PASTA"
+#define LONG_TEXT_ANCHOR_KERNEL   "QUOKKA-SCHEDULER"
+#define LONG_TEXT_ANCHOR_VIOLIN   "TARANTELLA-BRIDGE"
+#define LONG_TEXT_ANCHOR_ASTRO    "BETELGEUSE-PARALLAX"
+
+static const char *LONG_TEXT =
+    // Section 1 - cooking
+    "Cooking pasta well begins with abundant salted water at a rolling boil. "
+    "The " LONG_TEXT_ANCHOR_COOKING " technique calls for finishing the noodles "
+    "directly in the sauce, ladling in starchy cooking water until the emulsion "
+    "clings to each strand. Timing matters more than the package suggests: pull "
+    "the pasta a minute early and let the residual heat do the rest. "
+    "Salt aggressively. Stir often. Reserve water before draining. Toss vigorously. "
+    "Salt aggressively. Stir often. Reserve water before draining. Toss vigorously. "
+    "\n\n"
+    // Section 2 - kernel scheduling
+    "Operating system schedulers balance throughput against latency under load. "
+    "The " LONG_TEXT_ANCHOR_KERNEL " design favors short interactive tasks by "
+    "boosting their effective priority for a brief window after a wakeup event, "
+    "then decaying that boost as CPU time accumulates. This avoids starving "
+    "background batch work while keeping UI threads responsive. "
+    "Run queues, vruntime, and load balancing across cores all interact here. "
+    "Run queues, vruntime, and load balancing across cores all interact here. "
+    "\n\n"
+    // Section 3 - violin
+    "A violin's tone depends as much on setup as on the maker. The "
+    LONG_TEXT_ANCHOR_VIOLIN " is shaped from well-aged maple and positioned to "
+    "transmit string vibration to the top plate without damping the upper "
+    "partials. Soundpost placement, tailgut tension, and bow rosin all subtly "
+    "shift the instrument's voice. "
+    "Maple, spruce, varnish, and time. Maple, spruce, varnish, and time. "
+    "\n\n"
+    // Section 4 - astronomy
+    "Measuring stellar distances requires careful baseline geometry. The "
+    LONG_TEXT_ANCHOR_ASTRO " measurement is challenging because the star is a "
+    "pulsating red supergiant whose photosphere is not well defined. Modern "
+    "interferometry combined with Gaia astrometry has narrowed the uncertainty "
+    "but not eliminated it. "
+    "Parallax, redshift, standard candles, distance ladder. "
+    "Parallax, redshift, standard candles, distance ladder. ";
+
+// Structural: long text produces multiple chunks that fully cover the input,
+// every chunk has a valid embedding, and chunk offsets are well-formed.
+TEST(memory_add_long_text_chunking) {
+    // Force raw-text chunking so the chunk count is determined by
+    // max_tokens/overlay_tokens, not by markdown structure.
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 1);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 80);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 16);");
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_add_text(?1, 'long-text');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, LONG_TEXT, -1, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    char hash[DBMEM_HASH_STR_MAXLEN] = {0};
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'long-text' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(hash, sizeof(hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+    ASSERT(strlen(hash) == DBMEM_HASH_HEX_LEN);
+
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%s';", hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    int chunk_count = result_int;
+    ASSERT(chunk_count >= 3);
+
+    snprintf(sql, sizeof(sql),
+        "SELECT seq, offset, length, embedding, n_tokens, truncated FROM dbmem_vault "
+        "WHERE hash = '%s' ORDER BY seq;", hash);
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+
+    int prev_seq = -1;
+    int prev_offset = -1;
+    int last_offset = 0, last_length = 0;
+    int seen = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int seq    = sqlite3_column_int(stmt, 0);
+        int offset = sqlite3_column_int(stmt, 1);
+        int length = sqlite3_column_int(stmt, 2);
+        int bytes  = sqlite3_column_bytes(stmt, 3);
+        int n_tokens = sqlite3_column_int(stmt, 4);
+        int truncated = sqlite3_column_int(stmt, 5);
+
+        ASSERT(seq == prev_seq + 1);
+        ASSERT(offset >= prev_offset);
+        ASSERT(length > 0);
+        ASSERT(bytes == EXPECTED_DIMENSION * (int)sizeof(float));
+        ASSERT(n_tokens > 0);
+        ASSERT(truncated == 0);
+
+        prev_seq = seq;
+        prev_offset = offset;
+        last_offset = offset;
+        last_length = length;
+        seen++;
+    }
+    sqlite3_finalize(stmt);
+    ASSERT(seen == chunk_count);
+
+    int total = (int)strlen(LONG_TEXT);
+    // Allow small tail slack for trailing-whitespace trimming by the parser.
+    ASSERT(last_offset + last_length >= total - 8);
+
+    printf("(%d chunks covering %d bytes) ", chunk_count, total);
+
+    // Restore defaults for downstream tests.
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 400);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 80);");
+}
+
+// Retrieval: each section is reachable by a query phrase from that section.
+// Asserts on anchor-token presence in the top-3 snippets, not absolute
+// ranking, so minor embedding drift will not flake the test.
+TEST(memory_search_long_text_sections) {
+    struct { const char *query; const char *anchor; } cases[] = {
+        { "finishing pasta in the sauce with starchy water", LONG_TEXT_ANCHOR_COOKING },
+        { "boosting interactive task priority after wakeup", LONG_TEXT_ANCHOR_KERNEL  },
+        { "soundpost placement and string vibration",        LONG_TEXT_ANCHOR_VIOLIN  },
+        { "measuring stellar distance with parallax",        LONG_TEXT_ANCHOR_ASTRO   },
+    };
+    int n_cases = (int)(sizeof(cases) / sizeof(cases[0]));
+
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.0);");
+
+    int matched = 0;
+    for (int i = 0; i < n_cases; i++) {
+        sqlite3_stmt *stmt = NULL;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT snippet FROM memory_search(?1, 3);", -1, &stmt, NULL);
+        ASSERT(rc == SQLITE_OK);
+        rc = sqlite3_bind_text(stmt, 1, cases[i].query, -1, SQLITE_STATIC);
+        ASSERT(rc == SQLITE_OK);
+
+        int found = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *snippet = (const char *)sqlite3_column_text(stmt, 0);
+            if (snippet && strstr(snippet, cases[i].anchor)) { found = 1; break; }
+        }
+        sqlite3_finalize(stmt);
+
+        if (!found) {
+            printf("FAILED\n    Query '%s' did not retrieve anchor '%s' in top 3\n",
+                   cases[i].query, cases[i].anchor);
+            tests_failed++;
+            tests_passed--;
+            return;
+        }
+        matched++;
+    }
+
+    // Surface aggregate per-chunk metadata for the underlying long-text
+    // corpus (one row in dbmem_content, multiple chunks in dbmem_vault).
+    char long_text_hash[DBMEM_HASH_STR_MAXLEN] = {0};
+    sqlite3_stmt *hstmt = NULL;
+    int hrc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'long-text' LIMIT 1;",
+        -1, &hstmt, NULL);
+    int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    if (hrc == SQLITE_OK && sqlite3_step(hstmt) == SQLITE_ROW) {
+        snprintf(long_text_hash, sizeof(long_text_hash), "%s",
+                 (const char *)sqlite3_column_text(hstmt, 0));
+        sqlite3_finalize(hstmt);
+        get_vault_metadata(long_text_hash, &chunk_count, &min_tokens,
+                           &min_truncated, &max_truncated);
+    } else {
+        if (hstmt) sqlite3_finalize(hstmt);
+    }
+
+    printf("(%d/%d sections retrieved; %d chunks min_n_tok=%d any_trunc=%d) ",
+           matched, n_cases, chunk_count, min_tokens, max_truncated);
+
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.7);");
+}
+
+// ============================================================================
+// Phase 4c: Single-chunk near the provider token ceiling
+// ============================================================================
+
+// Control test for memory_search_truncation_signature below: same setup
+// (single-chunk-everything, pure-vector ranking, leading-mosaics + tail-
+// vents text alongside a short vent reference) but the long text is sized
+// to land *under* vectors.space's 1024-token batch ceiling. Expectations:
+//
+//   1) The long chunk embeds successfully (no provider rejection).
+//   2) Stored as exactly one chunk in dbmem_vault.
+//   3) A tail-topic query retrieves both the short reference and the long
+//      chunk in the top-10 — confirming the tail was included in the
+//      embedding when the input fit in one batch.
+//
+// Sized at ~5200 bytes. Empirical calibration: 7159 / 9346 / 10075 bytes
+// all rejected with the same "input (1026 tokens)" template (so "1026" is
+// not a real count — just an "exceeded" sentinel). 7159 / 1024 ≈ 7.0
+// chars-per-token actual ratio for this filler, so 5200 bytes ≈ ~740
+// tokens — clear of the 1024 ceiling.
+TEST(memory_search_under_token_limit) {
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 1);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 2048);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('vector_weight', 1.0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.0);");
+
+    static const char *SHORT_REF =
+        "Hydrothermal vents on the deep ocean floor sustain chemosynthetic "
+        "microbial ecosystems independent of sunlight. Tubeworms and "
+        "thermophilic archaea metabolize sulfur compounds emitted by the "
+        "vent fluids in total darkness.";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT memory_add_text(?1, 'under-limit-short');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, SHORT_REF, -1, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    static const char *MOSAIC_LEAD =
+        "Andalusian zellige mosaics from medieval Granada and Cordoba feature "
+        "interlocking geometric tiles arranged in repeating decagonal motifs "
+        "of cobalt and ochre glaze. ";
+    static const char *MOSAIC_FILLER =
+        "Master craftsmen historically cut tesserae from glazed terracotta "
+        "and fit them into intricate patterns whose mathematical foundations "
+        "anticipate aperiodic tilings by centuries; pigments include lapis "
+        "lazuli, copper carbonate, and iron oxides. ";
+    static const char *VENT_TAIL =
+        " And entirely separately, deep ocean hydrothermal vents host "
+        "chemosynthetic communities of microbial mats, tubeworms, and "
+        "thermophilic archaea metabolizing sulfur compounds in total darkness.";
+
+    size_t cap = 16 * 1024;
+    char *long_text = (char *)malloc(cap);
+    ASSERT(long_text != NULL);
+    size_t pos = 0;
+    int n = snprintf(long_text + pos, cap - pos, "%s", MOSAIC_LEAD);
+    pos += (size_t)n;
+    while (pos < 5000
+           && pos + strlen(MOSAIC_FILLER) + strlen(VENT_TAIL) + 4 < cap) {
+        n = snprintf(long_text + pos, cap - pos, "%s", MOSAIC_FILLER);
+        if (n <= 0) break;
+        pos += (size_t)n;
+    }
+    n = snprintf(long_text + pos, cap - pos, "%s", VENT_TAIL);
+    pos += (size_t)n;
+    int long_text_len = (int)pos;
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT memory_add_text(?1, 'under-limit-long');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, long_text, long_text_len, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        printf("FAILED\n    memory_add_text(%d bytes) returned rc=%d\n    sqlite error: %s\n",
+               long_text_len, rc, sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        free(long_text);
+        tests_failed++;
+        tests_passed--;
+        return;
+    }
+    sqlite3_finalize(stmt);
+    free(long_text);
+
+    char short_hash[DBMEM_HASH_STR_MAXLEN] = {0};
+    char long_hash[DBMEM_HASH_STR_MAXLEN]  = {0};
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'under-limit-short' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(short_hash, sizeof(short_hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'under-limit-long' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(long_hash, sizeof(long_hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    // Single chunk, length around ~5KB but under the rejection threshold.
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%s';", long_hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    ASSERT(result_int == 1);
+
+    snprintf(sql, sizeof(sql),
+        "SELECT length FROM dbmem_vault WHERE hash = '%s' LIMIT 1;", long_hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    int long_chunk_bytes = result_int;
+    ASSERT(long_chunk_bytes > 4500);
+
+    int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    int short_n_tokens = 0, short_truncated = 0;
+    int long_n_tokens  = 0, long_truncated  = 0;
+
+    rc = get_vault_metadata(short_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(chunk_count == 1);
+    ASSERT(min_tokens > 0);
+    ASSERT(min_truncated == 0 && max_truncated == 0);
+    short_n_tokens = min_tokens;
+    short_truncated = max_truncated;
+
+    rc = get_vault_metadata(long_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(chunk_count == 1);
+    ASSERT(min_tokens > 0);
+    ASSERT(min_truncated == 0 && max_truncated == 0);
+    long_n_tokens = min_tokens;
+    long_truncated = max_truncated;
+
+    // Same query as the truncation test; with the full chunk embedded we
+    // expect both the short ref and the long chunk to surface in top-10.
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash, ranking FROM memory_search("
+        "  'chemosynthesis around deep-sea volcanic vents', 10);",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+
+    int short_rank = -1, long_rank = -1;
+    double short_score = 0.0, long_score = 0.0;
+    int row = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *hash = (const char *)sqlite3_column_text(stmt, 0);
+        double rank = sqlite3_column_double(stmt, 1);
+        if (hash && strcmp(hash, short_hash) == 0) {
+            short_rank = row; short_score = rank;
+        }
+        if (hash && strcmp(hash, long_hash) == 0) {
+            long_rank  = row; long_score  = rank;
+        }
+        row++;
+    }
+    sqlite3_finalize(stmt);
+
+    ASSERT(short_rank >= 0);
+    ASSERT(long_rank >= 0);
+
+    printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d rank=%d score=%.3f) ",
+           short_n_tokens, short_truncated, short_rank, short_score,
+           long_chunk_bytes, long_n_tokens, long_truncated, long_rank, long_score);
+
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 400);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 80);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('vector_weight', 0.6);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.4);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.7);");
+}
+
+// ============================================================================
+// Phase 4d: Model-level truncation behavioral signature
+// ============================================================================
+
+// When a single chunk exceeds the embedding model's input context window
+// (embeddinggemma-300m: ~2048 tokens), the service truncates and returns an
+// embedding that only represents the leading portion. The truncated flag is
+// persisted on dbmem_vault, and this test also checks the observable search
+// behavior:
+//
+//   1) Store a SHORT reference (fully embedded) entirely about topic T.
+//   2) Store a LONG single-chunk document whose LEADING ~10KB is about an
+//      unrelated topic and whose final ~250 bytes (well past the 2048-token
+//      window) introduce topic T.
+//   3) Search for topic T with pure-vector ranking.
+//
+// If the long chunk's embedding includes the tail, both should rank in the
+// same neighborhood. If truncated, the long chunk's embedding only encodes
+// the unrelated leading topic and ranks far below the short reference (or
+// drops out of the top-K entirely).
+TEST(memory_search_truncation_signature) {
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 1);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 3000);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('vector_weight', 1.0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.0);");
+
+    // Short reference (~50 tokens), fully embedded, entirely about the topic.
+    // Trailing sentence differs per test so memory_add_text's content-hash
+    // idempotency doesn't collapse this insert into a no-op of an earlier
+    // test's identical SHORT_REF.
+    static const char *SHORT_REF =
+        "Hydrothermal vents on the deep ocean floor sustain chemosynthetic "
+        "microbial ecosystems independent of sunlight. Tubeworms and "
+        "thermophilic archaea metabolize sulfur compounds emitted by the "
+        "vent fluids in total darkness. Truncation-signature reference.";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT memory_add_text(?1, 'trunc-short');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, SHORT_REF, -1, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    // Build ~10KB single-chunk text: leading + filler about Andalusian
+    // mosaics, then a final ~250-byte tail introducing hydrothermal vents.
+    // ~10KB / ~4 chars-per-token ≈ 2500 tokens — past gemma's 2048 window.
+    static const char *MOSAIC_LEAD =
+        "Andalusian zellige mosaics from medieval Granada and Cordoba feature "
+        "interlocking geometric tiles arranged in repeating decagonal motifs "
+        "of cobalt and ochre glaze. ";
+    static const char *MOSAIC_FILLER =
+        "Master craftsmen historically cut tesserae from glazed terracotta "
+        "and fit them into intricate patterns whose mathematical foundations "
+        "anticipate aperiodic tilings by centuries; pigments include lapis "
+        "lazuli, copper carbonate, and iron oxides. ";
+    static const char *VENT_TAIL =
+        " And entirely separately, deep ocean hydrothermal vents host "
+        "chemosynthetic communities of microbial mats, tubeworms, and "
+        "thermophilic archaea metabolizing sulfur compounds in total darkness.";
+
+    size_t cap = 16 * 1024;
+    char *long_text = (char *)malloc(cap);
+    ASSERT(long_text != NULL);
+    size_t pos = 0;
+    int n = snprintf(long_text + pos, cap - pos, "%s", MOSAIC_LEAD);
+    pos += (size_t)n;
+    while (pos < 9800
+           && pos + strlen(MOSAIC_FILLER) + strlen(VENT_TAIL) + 4 < cap) {
+        n = snprintf(long_text + pos, cap - pos, "%s", MOSAIC_FILLER);
+        if (n <= 0) break;
+        pos += (size_t)n;
+    }
+    n = snprintf(long_text + pos, cap - pos, "%s", VENT_TAIL);
+    pos += (size_t)n;
+    int long_text_len = (int)pos;
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT memory_add_text(?1, 'trunc-long');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, long_text, long_text_len, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        printf("FAILED\n    memory_add_text(%d bytes) returned rc=%d\n    sqlite error: %s\n",
+               long_text_len, rc, sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        free(long_text);
+        tests_failed++;
+        tests_passed--;
+        return;
+    }
+    sqlite3_finalize(stmt);
+    free(long_text);
+
+    // Capture both hashes.
+    char short_hash[DBMEM_HASH_STR_MAXLEN] = {0};
+    char long_hash[DBMEM_HASH_STR_MAXLEN]  = {0};
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'trunc-short' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(short_hash, sizeof(short_hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'trunc-long' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(long_hash, sizeof(long_hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    // Confirm the long content stored as one chunk past gemma's window.
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%s';", long_hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    ASSERT(result_int == 1);
+
+    snprintf(sql, sizeof(sql),
+        "SELECT length FROM dbmem_vault WHERE hash = '%s' LIMIT 1;", long_hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    int long_chunk_bytes = result_int;
+    // ~2048 tokens × ~4 chars/token = ~8192 chars; chunk must clearly exceed.
+    ASSERT(long_chunk_bytes > 9000);
+
+    int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    int short_n_tokens = 0, short_truncated = 0;
+    int long_n_tokens  = 0, long_truncated  = 0;
+
+    rc = get_vault_metadata(short_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(chunk_count == 1);
+    ASSERT(min_tokens > 0);
+    ASSERT(min_truncated == 0 && max_truncated == 0);
+    short_n_tokens = min_tokens;
+    short_truncated = max_truncated;
+
+    rc = get_vault_metadata(long_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(chunk_count == 1);
+    ASSERT(min_tokens > 0);
+    ASSERT(min_truncated == 1 && max_truncated == 1);
+    long_n_tokens = min_tokens;
+    long_truncated = max_truncated;
+
+    // Query for the topic that appears throughout the short reference and
+    // only in the *tail* of the long chunk. Paraphrased so any residual FTS
+    // contribution would match both texts roughly equally.
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash, ranking FROM memory_search("
+        "  'chemosynthesis around deep-sea volcanic vents', 10);",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+
+    int short_rank = -1, long_rank = -1;
+    double short_score = 0.0, long_score = 0.0;
+    int row = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *hash = (const char *)sqlite3_column_text(stmt, 0);
+        double rank = sqlite3_column_double(stmt, 1);
+        if (hash && strcmp(hash, short_hash) == 0) {
+            short_rank = row; short_score = rank;
+        }
+        if (hash && strcmp(hash, long_hash) == 0) {
+            long_rank  = row; long_score  = rank;
+        }
+        row++;
+    }
+    sqlite3_finalize(stmt);
+
+    ASSERT(short_rank >= 0);
+    if (long_rank == -1) {
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d absent from top-10) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated);
+    } else {
+        // With a fully-embedded long chunk we'd expect comparable rankings;
+        // truncation pushes the long chunk strictly below the short ref.
+        ASSERT(short_rank < long_rank);
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d rank=%d score=%.3f) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated, long_rank, long_score);
+    }
+
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 400);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 80);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('vector_weight', 0.6);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.4);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.7);");
+}
+
+// ============================================================================
+// Phase 4e: Truncation signature near the model context window (~2000 tok)
+// ============================================================================
+
+// Same shape as memory_search_truncation_signature, but with a long text
+// sized at ~19500 bytes / ~9.8 chars-per-token ≈ ~1990 tokens — close to
+// embeddinggemma-300m's documented 2048-token context window. Useful for
+// observing how the provider behaves further past the 1024-token batch
+// ceiling: same rejection error, a different message, or (if the batch
+// size is raised on the server) a successful embed where truncation
+// actually occurs.
+TEST(memory_search_truncation_near_model_context) {
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 1);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 6000);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('vector_weight', 1.0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.0);");
+
+    // Trailing sentence differs from the other tests' SHORT_REFs so the
+    // content-hash idempotency in memory_add_text doesn't collapse the insert.
+    static const char *SHORT_REF =
+        "Hydrothermal vents on the deep ocean floor sustain chemosynthetic "
+        "microbial ecosystems independent of sunlight. Tubeworms and "
+        "thermophilic archaea metabolize sulfur compounds emitted by the "
+        "vent fluids in total darkness. Near-context reference.";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT memory_add_text(?1, 'trunc-large-short');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, SHORT_REF, -1, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(sqlite3_step(stmt) == SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    static const char *MOSAIC_LEAD =
+        "Andalusian zellige mosaics from medieval Granada and Cordoba feature "
+        "interlocking geometric tiles arranged in repeating decagonal motifs "
+        "of cobalt and ochre glaze. ";
+    static const char *MOSAIC_FILLER =
+        "Master craftsmen historically cut tesserae from glazed terracotta "
+        "and fit them into intricate patterns whose mathematical foundations "
+        "anticipate aperiodic tilings by centuries; pigments include lapis "
+        "lazuli, copper carbonate, and iron oxides. ";
+    static const char *VENT_TAIL =
+        " And entirely separately, deep ocean hydrothermal vents host "
+        "chemosynthetic communities of microbial mats, tubeworms, and "
+        "thermophilic archaea metabolizing sulfur compounds in total darkness.";
+
+    size_t cap = 32 * 1024;
+    char *long_text = (char *)malloc(cap);
+    ASSERT(long_text != NULL);
+    size_t pos = 0;
+    int n = snprintf(long_text + pos, cap - pos, "%s", MOSAIC_LEAD);
+    pos += (size_t)n;
+    while (pos < 19300
+           && pos + strlen(MOSAIC_FILLER) + strlen(VENT_TAIL) + 4 < cap) {
+        n = snprintf(long_text + pos, cap - pos, "%s", MOSAIC_FILLER);
+        if (n <= 0) break;
+        pos += (size_t)n;
+    }
+    n = snprintf(long_text + pos, cap - pos, "%s", VENT_TAIL);
+    pos += (size_t)n;
+    int long_text_len = (int)pos;
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT memory_add_text(?1, 'trunc-large-long');", -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_bind_text(stmt, 1, long_text, long_text_len, SQLITE_STATIC);
+    ASSERT(rc == SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        printf("FAILED\n    memory_add_text(%d bytes) returned rc=%d\n    sqlite error: %s\n",
+               long_text_len, rc, sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        free(long_text);
+        tests_failed++;
+        tests_passed--;
+        return;
+    }
+    sqlite3_finalize(stmt);
+    free(long_text);
+
+    char short_hash[DBMEM_HASH_STR_MAXLEN] = {0};
+    char long_hash[DBMEM_HASH_STR_MAXLEN]  = {0};
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'trunc-large-short' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(short_hash, sizeof(short_hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM dbmem_content WHERE context = 'trunc-large-long' LIMIT 1;",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW);
+    snprintf(long_hash, sizeof(long_hash), "%s", (const char *)sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%s';", long_hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    ASSERT(result_int == 1);
+
+    snprintf(sql, sizeof(sql),
+        "SELECT length FROM dbmem_vault WHERE hash = '%s' LIMIT 1;", long_hash);
+    result_int = 0;
+    sqlite3_exec(db, sql, capture_int, NULL, NULL);
+    int long_chunk_bytes = result_int;
+    ASSERT(long_chunk_bytes > 18000);
+
+    int chunk_count = 0, min_tokens = 0, min_truncated = 0, max_truncated = 0;
+    int short_n_tokens = 0, short_truncated = 0;
+    int long_n_tokens  = 0, long_truncated  = 0;
+
+    rc = get_vault_metadata(short_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(chunk_count == 1);
+    ASSERT(min_tokens > 0);
+    ASSERT(min_truncated == 0 && max_truncated == 0);
+    short_n_tokens = min_tokens;
+    short_truncated = max_truncated;
+
+    rc = get_vault_metadata(long_hash, &chunk_count, &min_tokens, &min_truncated, &max_truncated);
+    ASSERT(rc == SQLITE_OK);
+    ASSERT(chunk_count == 1);
+    ASSERT(min_tokens > 0);
+    ASSERT(min_truncated == 1 && max_truncated == 1);
+    long_n_tokens = min_tokens;
+    long_truncated = max_truncated;
+
+    rc = sqlite3_prepare_v2(db,
+        "SELECT hash, ranking FROM memory_search("
+        "  'chemosynthesis around deep-sea volcanic vents', 10);",
+        -1, &stmt, NULL);
+    ASSERT(rc == SQLITE_OK);
+
+    int short_rank = -1, long_rank = -1;
+    double short_score = 0.0, long_score = 0.0;
+    int row = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *hash = (const char *)sqlite3_column_text(stmt, 0);
+        double rank = sqlite3_column_double(stmt, 1);
+        if (hash && strcmp(hash, short_hash) == 0) {
+            short_rank = row; short_score = rank;
+        }
+        if (hash && strcmp(hash, long_hash) == 0) {
+            long_rank  = row; long_score  = rank;
+        }
+        row++;
+    }
+    sqlite3_finalize(stmt);
+
+    ASSERT(short_rank >= 0);
+    if (long_rank == -1) {
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d absent from top-10) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated);
+    } else {
+        ASSERT(short_rank < long_rank);
+        printf("(short: n_tok=%d trunc=%d rank=%d score=%.3f; long: %d bytes n_tok=%d trunc=%d rank=%d score=%.3f) ",
+               short_n_tokens, short_truncated, short_rank, short_score,
+               long_chunk_bytes, long_n_tokens, long_truncated, long_rank, long_score);
+    }
+
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('skip_semantic', 0);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('max_tokens', 400);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('overlay_tokens', 80);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('vector_weight', 0.6);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('text_weight', 0.4);");
+    ASSERT_SQL_OK(db, "SELECT memory_set_option('min_score', 0.7);");
+}
+
+// ============================================================================
 // Phase 5: Deletion
 // ============================================================================
 
@@ -531,6 +1324,7 @@ int main(void) {
     // Phase 3: Content Management (network calls)
     RUN_TEST(memory_add_text);
     RUN_TEST(verify_embedding);
+    RUN_TEST(verify_embedding_metadata);
     RUN_TEST(memory_add_text_context);
     RUN_TEST(memory_add_text_idempotent);
 #ifndef DBMEM_OMIT_IO
@@ -542,6 +1336,19 @@ int main(void) {
     RUN_TEST(memory_search);
     RUN_TEST(memory_search_ranking);
     RUN_TEST(memory_search_statement_reuse);
+
+    // Phase 4b: Long-text chunking + multi-section retrieval
+    RUN_TEST(memory_add_long_text_chunking);
+    RUN_TEST(memory_search_long_text_sections);
+
+    // Phase 4c: Single-chunk near (under) the provider token ceiling
+    RUN_TEST(memory_search_under_token_limit);
+
+    // Phase 4d: Model-level truncation behavioral signature
+    RUN_TEST(memory_search_truncation_signature);
+
+    // Phase 4e: Same shape, but text size pushed near the model context window
+    RUN_TEST(memory_search_truncation_near_model_context);
 
     // Phase 5: Deletion
     RUN_TEST(memory_delete);
