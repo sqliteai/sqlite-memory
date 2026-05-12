@@ -540,9 +540,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
 
     // extract fields
     int n_embd = 0;
-    int prompt_tokens = 0;
-    int estimated_prompt_tokens = 0;
-    int exact_prompt_tokens = 0;
+    int request_tokens = 0;
     bool truncated = false;
     int emb_start = -1;
     size_t emb_count = 0;
@@ -588,19 +586,9 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
 
     int usage_index = dbmem_json_object_find(engine->data, tokens, 0, "usage");
     if (usage_index >= 0 && tokens[usage_index].type == JSMN_OBJECT) {
-        int prompt_tokens_index = dbmem_json_object_find(engine->data, tokens, usage_index, "prompt_tokens");
-        if (prompt_tokens_index >= 0 && tokens[prompt_tokens_index].type == JSMN_PRIMITIVE) {
-            prompt_tokens = atoi(engine->data + tokens[prompt_tokens_index].start);
-        }
-
-        int exact_prompt_tokens_index = dbmem_json_object_find(engine->data, tokens, usage_index, "exact_prompt_tokens");
-        if (exact_prompt_tokens_index >= 0 && tokens[exact_prompt_tokens_index].type == JSMN_PRIMITIVE) {
-            exact_prompt_tokens = atoi(engine->data + tokens[exact_prompt_tokens_index].start);
-        }
-
-        int estimated_prompt_tokens_index = dbmem_json_object_find(engine->data, tokens, usage_index, "estimated_prompt_tokens");
-        if (estimated_prompt_tokens_index >= 0 && tokens[estimated_prompt_tokens_index].type == JSMN_PRIMITIVE) {
-            estimated_prompt_tokens = atoi(engine->data + tokens[estimated_prompt_tokens_index].start);
+        int request_tokens_index = dbmem_json_object_find(engine->data, tokens, usage_index, "request_tokens");
+        if (request_tokens_index >= 0 && tokens[request_tokens_index].type == JSMN_PRIMITIVE) {
+            request_tokens = atoi(engine->data + tokens[request_tokens_index].start);
         }
     }
 
@@ -632,7 +620,7 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
 
     // Fill result
     result->n_embd = n_embd;
-    result->n_tokens = exact_prompt_tokens > 0 ? exact_prompt_tokens : (estimated_prompt_tokens > 0 ? estimated_prompt_tokens : prompt_tokens);
+    result->n_tokens = request_tokens;
     result->truncated = truncated;
     result->embedding = engine->embedding;
 
