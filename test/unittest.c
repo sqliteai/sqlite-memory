@@ -31,6 +31,10 @@
 
 #ifdef TEST_SQLITE_EXTENSION
 #include "sqlite-memory.h"
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+#include "ggml.h"
+void dbmem_logger(enum ggml_log_level level, const char *text, void *user_data);
+#endif
 #endif
 
 // ============================================================================
@@ -3082,6 +3086,12 @@ TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine) {
 }
 #endif
 
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+TEST(sqlite_local_logger_ignores_stale_user_data) {
+    dbmem_logger(GGML_LOG_LEVEL_WARN, "ignored warning", (void *)1);
+}
+#endif
+
 #endif // TEST_SQLITE_EXTENSION
 
 // ============================================================================
@@ -3233,6 +3243,9 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
 #else
     RUN_TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine);
+#endif
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+    RUN_TEST(sqlite_local_logger_ignores_stale_user_data);
 #endif
 #endif
 
