@@ -1110,8 +1110,12 @@ int dbmem_parse (const char *md, size_t md_len, dbmem_parse_settings *settings) 
             src_len = src_end - src_off;
         }
 
-        // Invoke callback
-        if (settings->callback) {
+        // Invoke callback (skip whitespace-only chunks)
+        bool has_text = false;
+        for (size_t k = 0; k < chunk_len; k++) {
+            if (!isspace((unsigned char)chunk_text[k])) { has_text = true; break; }
+        }
+        if (has_text && settings->callback) {
             rc = settings->callback(chunk_text, chunk_len, src_off, src_len, settings->xdata, i);
             if (rc != 0) break;
         }
