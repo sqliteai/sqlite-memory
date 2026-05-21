@@ -31,6 +31,10 @@
 
 #ifdef TEST_SQLITE_EXTENSION
 #include "sqlite-memory.h"
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+#include "ggml.h"
+void dbmem_logger(enum ggml_log_level level, const char *text, void *user_data);
+#endif
 #endif
 
 // ============================================================================
@@ -2564,6 +2568,8 @@ typedef struct {
     char api_key[256];
 } dummy_engine_t;
 
+static int dummy_compute_calls = 0;
+
 static void *dummy_init(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
     UNUSED_PARAM(model);
     UNUSED_PARAM(xdata);
@@ -2584,6 +2590,7 @@ static int dummy_compute(void *engine, const char *text, int text_len, void *xda
     UNUSED_PARAM(xdata);
     dummy_engine_t *e = (dummy_engine_t *)engine;
     e->compute_count++;
+    dummy_compute_calls++;
     result->n_tokens = text_len / 4;
     result->truncated = false;
     result->n_embd = e->dimension;
@@ -2773,6 +2780,35 @@ TEST(sqlite_custom_provider_add_text) {
     ASSERT_EQ(result, 7);
 
     rc = exec_get_int(db, "SELECT truncated FROM dbmem_vault LIMIT 1;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_custom_provider_skips_whitespace_only_text) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    dummy_compute_calls = 0;
+    rc = exec_get_int(db, "SELECT memory_add_text('   \n\n   \n');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+    ASSERT_EQ(dummy_compute_calls, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 0);
 
@@ -3050,6 +3086,12 @@ TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine) {
 }
 #endif
 
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+TEST(sqlite_local_logger_ignores_stale_user_data) {
+    dbmem_logger(GGML_LOG_LEVEL_WARN, "ignored warning", (void *)1);
+}
+#endif
+
 #endif // TEST_SQLITE_EXTENSION
 
 // ============================================================================
@@ -3190,6 +3232,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_register);
     RUN_TEST(sqlite_custom_provider_set_model);
     RUN_TEST(sqlite_custom_provider_add_text);
+    RUN_TEST(sqlite_custom_provider_skips_whitespace_only_text);
     RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
     RUN_TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files);
     RUN_TEST(sqlite_custom_provider_null_callbacks);
@@ -3200,6 +3243,9 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
 #else
     RUN_TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine);
+#endif
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+    RUN_TEST(sqlite_local_logger_ignores_stale_user_data);
 #endif
 #endif
 

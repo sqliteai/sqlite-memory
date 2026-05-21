@@ -8,7 +8,6 @@
 #include <math.h>
 #include <float.h>
 #include <stdio.h>
-#include <ctype.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -999,6 +998,28 @@ rollback:
 
 // MARK: - Cache Clear -
 
+static int dbmem_cache_clear_provider_model(sqlite3 *db, const char *provider, const char *model) {
+    static const char *sql = "DELETE FROM dbmem_cache WHERE provider=?1 AND model=?2;";
+    if (!provider || !model) return SQLITE_OK;
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_text(vm, 1, provider, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_bind_text(vm, 2, model, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
 static void dbmem_cache_clear (sqlite3_context *context, int argc, sqlite3_value **argv) {
     sqlite3 *db = sqlite3_context_db_handle(context);
     int rc;
@@ -1013,15 +1034,7 @@ static void dbmem_cache_clear (sqlite3_context *context, int argc, sqlite3_value
         const char *provider = (const char *)sqlite3_value_text(argv[0]);
         const char *model = (const char *)sqlite3_value_text(argv[1]);
 
-        sqlite3_stmt *vm = NULL;
-        rc = sqlite3_prepare_v2(db, "DELETE FROM dbmem_cache WHERE provider=?1 AND model=?2;", -1, &vm, NULL);
-        if (rc == SQLITE_OK) {
-            sqlite3_bind_text(vm, 1, provider, -1, SQLITE_STATIC);
-            sqlite3_bind_text(vm, 2, model, -1, SQLITE_STATIC);
-            rc = sqlite3_step(vm);
-            if (rc == SQLITE_DONE) rc = SQLITE_OK;
-        }
-        if (vm) sqlite3_finalize(vm);
+        rc = dbmem_cache_clear_provider_model(db, provider, model);
     } else {
         sqlite3_result_error(context, "The function memory_cache_clear expects 0 or 2 arguments", SQLITE_ERROR);
         return;
@@ -1141,7 +1154,8 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
             return;
         }
 
-        new_l_engine = dbmem_local_engine_init(ctx, model, ctx->error_msg);
+        int max_context_tokens = (int)(ctx->max_tokens + ctx->overlay_tokens);
+        new_l_engine = dbmem_local_engine_init(ctx, model, max_context_tokens, ctx->error_msg);
         if (new_l_engine == NULL) {
             dbmemory_free(new_provider);
             dbmemory_free(new_model);
@@ -1299,26 +1313,94 @@ static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value 
 
 // MARK: -
 
+static bool dbmem_is_local_context_option(const char *key) {
+    return (strcasecmp(key, DBMEM_SETTINGS_KEY_MAX_TOKENS) == 0 ||
+            strcasecmp(key, DBMEM_SETTINGS_KEY_OVERLAY_TOKENS) == 0);
+}
+
+static int dbmem_rebuild_local_engine_for_context_options(dbmem_context *ctx) {
+    #ifndef DBMEM_OMIT_LOCAL_ENGINE
+    if (!ctx || !ctx->is_local || ctx->is_custom || !ctx->model || !ctx->l_engine) {
+        return SQLITE_OK;
+    }
+
+    int max_context_tokens = (int)(ctx->max_tokens + ctx->overlay_tokens);
+    dbmem_local_engine_t *new_l_engine = dbmem_local_engine_init(ctx, ctx->model, max_context_tokens, ctx->error_msg);
+    if (new_l_engine == NULL) {
+        return SQLITE_ERROR;
+    }
+
+    if (ctx->engine_warmup) {
+        dbmem_local_engine_warmup(new_l_engine);
+    }
+
+    int rc = dbmem_cache_clear_provider_model(ctx->db, ctx->provider, ctx->model);
+    if (rc != SQLITE_OK) {
+        dbmem_local_engine_free(new_l_engine);
+        return rc;
+    }
+
+    dbmem_local_engine_free(ctx->l_engine);
+    ctx->l_engine = new_l_engine;
+    #else
+    UNUSED_PARAM(ctx);
+    #endif
+
+    return SQLITE_OK;
+}
+
 static void dbmem_set_option (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc);
+
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
         sqlite3_result_error(context, "The function memory_set_option expects the key argument to be of type TEXT", SQLITE_ERROR);
         return;
     }
     
-    // update settings
     sqlite3 *db = sqlite3_context_db_handle(context);
     const char *key = (const char *)sqlite3_value_text(argv[0]);
-    int rc = dbmem_settings_write_value(db, key, argv[1]);
     
     // retrieve context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    ctx->error_msg[0] = 0;
+
+    bool context_option = dbmem_is_local_context_option(key);
+    size_t old_max_tokens = ctx->max_tokens;
+    size_t old_overlay_tokens = ctx->overlay_tokens;
+
+    int rc = sqlite3_exec(db, "SAVEPOINT dbmem_set_option;", NULL, NULL, NULL);
+    bool savepoint_started = (rc == SQLITE_OK);
+
+    if (rc == SQLITE_OK) {
+        rc = dbmem_settings_write_value(db, key, argv[1]);
+    }
     
     if (rc == SQLITE_OK) {
         dbmem_settings_sync(ctx, key, argv[1]);
     }
+
+    if (rc == SQLITE_OK && context_option &&
+        (old_max_tokens != ctx->max_tokens || old_overlay_tokens != ctx->overlay_tokens)) {
+        rc = dbmem_rebuild_local_engine_for_context_options(ctx);
+    }
+
+    if (rc == SQLITE_OK && savepoint_started) {
+        rc = sqlite3_exec(db, "RELEASE dbmem_set_option;", NULL, NULL, NULL);
+        savepoint_started = false;
+    }
+
+    if (rc != SQLITE_OK) {
+        if (savepoint_started) {
+            sqlite3_exec(db, "ROLLBACK TO dbmem_set_option; RELEASE dbmem_set_option;", NULL, NULL, NULL);
+        }
+        if (context_option) {
+            ctx->max_tokens = old_max_tokens;
+            ctx->overlay_tokens = old_overlay_tokens;
+        }
+    }
     
-    (rc == SQLITE_OK) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+    (rc == SQLITE_OK) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : sqlite3_errmsg(db), -1);
 }
 
 static void dbmem_get_option (sqlite3_context *context, int argc, sqlite3_value **argv) {
