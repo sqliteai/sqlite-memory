@@ -1573,6 +1573,11 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
     }
 
     if (!cache_hit) {
+        if (!ctx->provider || !ctx->model) {
+            dbmem_context_set_error(ctx, "memory_set_model must be called before adding content");
+            return SQLITE_ERROR;
+        }
+
         // compute embedding
         if (ctx->is_custom) {
             if (!ctx->custom_engine || !ctx->custom_provider.compute) {
