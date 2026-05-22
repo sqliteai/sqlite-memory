@@ -772,7 +772,7 @@ bool dbmem_context_load_vector (dbmem_context *ctx) {
     }
 
     if (ctx->dimension == 0) {
-        dbmem_context_set_error(ctx, "SQLite-vector extension cannot be loaded because embedding dimension is not specified");
+        dbmem_context_set_error(ctx, "memory_search cannot run because no content has been indexed yet. Add content with memory_add_text(), memory_add_file(), or memory_add_directory() before searching.");
         return false;
     }
     
