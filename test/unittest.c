@@ -2730,6 +2730,21 @@ TEST(sqlite_custom_provider_set_model) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_add_text_requires_model) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_add_text('Hello world, this is a test.');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ERROR);
+    ASSERT(strstr(sqlite3_errmsg(db), "memory_set_model must be called before adding content") != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_custom_provider_add_text) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -3231,6 +3246,7 @@ int main(int argc, char *argv[]) {
     printf("\nCustom provider tests:\n");
     RUN_TEST(sqlite_custom_provider_register);
     RUN_TEST(sqlite_custom_provider_set_model);
+    RUN_TEST(sqlite_memory_add_text_requires_model);
     RUN_TEST(sqlite_custom_provider_add_text);
     RUN_TEST(sqlite_custom_provider_skips_whitespace_only_text);
     RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
