@@ -1575,12 +1575,20 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
     if (!cache_hit) {
         // compute embedding
         if (ctx->is_custom) {
+            if (!ctx->custom_engine || !ctx->custom_provider.compute) {
+                dbmem_context_set_error(ctx, "memory_set_model must be called before adding content");
+                return SQLITE_ERROR;
+            }
             rc = dbmem_context_custom_compute(ctx, text, (int)len, &result);
             if (rc != 0) return rc;
         }
 
         else if (ctx->is_local) {
         #ifndef DBMEM_OMIT_LOCAL_ENGINE
+            if (!ctx->l_engine) {
+                dbmem_context_set_error(ctx, "memory_set_model must be called before adding content");
+                return SQLITE_ERROR;
+            }
             rc = dbmem_local_compute_embedding(ctx->l_engine, text, (int)len, &result);
             if (rc != 0) return rc;
         #else
@@ -1591,6 +1599,10 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
 
         else {
         #ifndef DBMEM_OMIT_REMOTE_ENGINE
+            if (!ctx->r_engine) {
+                dbmem_context_set_error(ctx, "memory_set_model must be called before adding content");
+                return SQLITE_ERROR;
+            }
             rc = dbmem_remote_compute_embedding(ctx->r_engine, text, (int)len, &result);
             if (rc != 0) return rc;
         #else
