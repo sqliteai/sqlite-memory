@@ -43,6 +43,8 @@ func ToolNames() []string {
 		"memory_delete_context",
 		"memory_reindex",
 		"memory_status",
+		"memory_get",
+		"memory_query",
 	}
 }
 
@@ -155,6 +157,12 @@ func tools() []map[string]any {
 		}, []string{"context"}),
 		tool("memory_reindex", map[string]any{}, nil),
 		tool("memory_status", map[string]any{}, nil),
+		tool("memory_get", map[string]any{
+			"hash": stringSchema("Content hash from a memory_search result"),
+		}, []string{"hash"}),
+		tool("memory_query", map[string]any{
+			"query": stringSchema("Read-only SELECT statement to run against the memory database"),
+		}, []string{"query"}),
 	}
 }
 
@@ -198,6 +206,10 @@ func (s Server) callTool(ctx context.Context, name string, args map[string]any) 
 		return "ok", memory.Delete(ctx, s.DB, strArg(args, "hash"))
 	case "memory_delete_context":
 		return "ok", memory.DeleteContext(ctx, s.DB, strArg(args, "context"))
+	case "memory_get":
+		return memory.Get(ctx, s.DB, strArg(args, "hash"))
+	case "memory_query":
+		return memory.Query(ctx, s.DB, strArg(args, "query"))
 	case "memory_reindex":
 		return "ok", memory.Reindex(ctx, s.DB)
 	case "memory_status":
