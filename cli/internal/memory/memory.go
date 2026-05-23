@@ -157,6 +157,72 @@ func Status(ctx context.Context, db *sql.DB) (map[string]any, error) {
 	return out, nil
 }
 
+type ContentResult struct {
+	Hash         string  `json:"hash"`
+	Path         string  `json:"path"`
+	Context      *string `json:"context"`
+	Value        *string `json:"value"`
+	CreatedAt    int64   `json:"created_at"`
+	LastAccessed int64   `json:"last_accessed"`
+}
+
+func Get(ctx context.Context, db *sql.DB, hash string) (string, error) {
+	var r ContentResult
+	err := db.QueryRowContext(ctx,
+		"SELECT hash, path, context, value, created_at, last_accessed FROM dbmem_content WHERE hash = ?",
+		hash,
+	).Scan(&r.Hash, &r.Path, &r.Context, &r.Value, &r.CreatedAt, &r.LastAccessed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("hash not found: %s", hash)
+	}
+	if err != nil {
+		return "", err
+	}
+	data, _ := json.MarshalIndent(r, "", "  ")
+	return string(data), nil
+}
+
+func Query(ctx context.Context, db *sql.DB, query string) (string, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+		return "", err
+	}
+	rows, err := conn.QueryContext(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+	var results []map[string]any
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return "", err
+		}
+		row := make(map[string]any, len(cols))
+		for i, col := range cols {
+			row[col] = vals[i]
+		}
+		results = append(results, row)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	data, _ := json.MarshalIndent(results, "", "  ")
+	return string(data), nil
+}
+
 func ResultsJSON(results []SearchResult) string {
 	data, _ := json.MarshalIndent(results, "", "  ")
 	return string(data)

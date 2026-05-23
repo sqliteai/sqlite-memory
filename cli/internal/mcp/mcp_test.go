@@ -23,6 +23,8 @@ func TestToolNames(t *testing.T) {
 		"memory_delete_context": true,
 		"memory_reindex":        true,
 		"memory_status":         true,
+		"memory_get":            true,
+		"memory_query":          true,
 	}
 	for _, name := range names {
 		delete(want, name)
