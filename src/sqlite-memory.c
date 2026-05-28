@@ -141,9 +141,20 @@ struct dbmem_context {
     char        error_msg[DBMEM_ERRBUF_SIZE];   // Error message buffer
 };
 
-static bool fts5_is_available = true;
+// MARK: - Internal prototypes
 
+typedef struct dbmem_string_list dbmem_string_list;
+typedef struct dbmem_json_buffer dbmem_json_buffer;
+
+static int dbmem_database_begin_transaction (sqlite3 *db);
+static int dbmem_database_commit_transaction (sqlite3 *db);
+static int dbmem_database_rollback_transaction (sqlite3 *db);
+static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset);
 static char *dbmem_path_normalized_copy (const char *path);
+static char *dbmem_path_unique_storage_copy (sqlite3 *db, const char *preferred_path, const char *source_path);
+static int dbmem_reindex (dbmem_context *ctx);
+
+static bool fts5_is_available = true;
 
 static int dbmem_bind_hash (sqlite3_stmt *vm, int index, uint64_t hash) {
     char hash_text[DBMEM_HASH_STR_MAXLEN];
@@ -481,10 +492,6 @@ static bool dbmem_database_is_enabled (sqlite3 *db, int *out_rc) {
 static int dbmem_database_set_schema_version (sqlite3 *db, int version) {
     return dbmem_settings_write_int(db, DBMEM_SETTINGS_KEY_SCHEMA_VERSION, version);
 }
-
-static int dbmem_database_begin_transaction (sqlite3 *db);
-static int dbmem_database_commit_transaction (sqlite3 *db);
-static int dbmem_database_rollback_transaction (sqlite3 *db);
 
 static int dbmem_database_migrate_v1_to_v2 (sqlite3 *db) {
     int rc = dbmem_database_add_column_if_missing(db, "dbmem_vault", "n_tokens",
@@ -1510,17 +1517,17 @@ cleanup:
 
 // MARK: - Path Listing -
 
-typedef struct {
+struct dbmem_string_list {
     char **items;
     int count;
     int capacity;
-} dbmem_string_list;
+};
 
-typedef struct {
+struct dbmem_json_buffer {
     char *data;
     size_t length;
     size_t capacity;
-} dbmem_json_buffer;
+};
 
 static bool dbmem_path_separator (char c) {
     return c == '/' || c == '\\';
@@ -1822,8 +1829,6 @@ static int dbmem_json_append_file_node (dbmem_json_buffer *json, const char *pat
     return dbmem_json_buffer_append_char(json, '}');
 }
 
-static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset);
-
 static int dbmem_json_append_directory_node (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset) {
     const char *path = paths->items[start];
     size_t segment_start = dbmem_path_segment_start(path, offset);
@@ -2017,8 +2022,6 @@ static void dbmem_version (sqlite3_context *context, int argc, sqlite3_value **a
     UNUSED_PARAM(argc); UNUSED_PARAM(argv);
     sqlite3_result_text(context, SQLITE_DBMEMORY_VERSION, -1, NULL);
 }
-
-static int dbmem_reindex(dbmem_context *ctx);
 
 static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // 2 TEXT arguments: provider and model
@@ -2611,8 +2614,6 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
 cleanup:
     return rc;
 }
-
-static char *dbmem_path_unique_storage_copy (sqlite3 *db, const char *preferred_path, const char *source_path);
 
 static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t len) {
     uint64_t hash = dbmem_hash_compute(buffer, (size_t)len);
