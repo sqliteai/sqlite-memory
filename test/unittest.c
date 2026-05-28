@@ -1168,7 +1168,7 @@ TEST(dbmem_parse_code_with_markdown_inside) {
 
 // Helper to create a file with content
 static int create_test_file(const char *path, const char *content) {
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(path, "wb");
     if (!f) return -1;
     if (content) fputs(content, f);
     fclose(f);
@@ -2927,6 +2927,31 @@ TEST(sqlite_sync_directory_ignores_sibling_prefixes) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_sync_directory_keeps_logical_rows_without_source_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *test_dir = TEST_TMP_DIR "/dbmem_test_sync_logical";
+    rmdir_p(test_dir);
+    mkdir_p(test_dir);
+
+    int rc = insert_fake_content(db, 4001, "logical-note-without-source", "ctx", 4);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = -1;
+    rc = exec_get_int(db, "SELECT memory_add_directory('" TEST_TMP_DIR "/dbmem_test_sync_logical');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'logical-note-without-source';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rmdir_p(test_dir);
+    sqlite3_close(db);
+}
+
 TEST(sqlite_cache_table_exists) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -3650,6 +3675,48 @@ TEST(sqlite_memory_add_directory_stores_relative_paths) {
     rmdir_p(base);
 }
 
+TEST(sqlite_memory_add_directory_preserves_text_entries) {
+    const char *base = TEST_TMP_DIR "/dbmem_preserve_text_scan";
+    const char *file = TEST_TMP_DIR "/dbmem_preserve_text_scan/file.md";
+
+    remove_test_file(file);
+    rmdir_p(base);
+    mkdir_p(base);
+    ASSERT_EQ(create_test_file(file, "# File\nFilesystem content."), 0);
+
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_text('Logical text entry should survive directory sync.', 'test-context');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_add_directory('" TEST_TMP_DIR "/dbmem_preserve_text_scan');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE context = 'test-context';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    sqlite3_close(db);
+    remove_test_file(file);
+    rmdir_p(base);
+}
+
 TEST(sqlite_memory_add_content_rejects_non_text_content) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -4360,6 +4427,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_sync_directory_removes_all_deleted);
     RUN_TEST(sqlite_sync_directory_skips_unchanged);
     RUN_TEST(sqlite_sync_directory_ignores_sibling_prefixes);
+    RUN_TEST(sqlite_sync_directory_keeps_logical_rows_without_source_path);
 
     printf("\nSQLite extension advanced tests:\n");
     RUN_TEST(sqlite_memory_delete_with_vault_data);
@@ -4402,6 +4470,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_add_file_disambiguates_parent_collisions);
 #endif
     RUN_TEST(sqlite_memory_add_directory_stores_relative_paths);
+    RUN_TEST(sqlite_memory_add_directory_preserves_text_entries);
     RUN_TEST(sqlite_memory_add_content_rejects_non_text_content);
     RUN_TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files);
     RUN_TEST(sqlite_custom_provider_null_callbacks);

@@ -114,7 +114,7 @@ static int capture_int(void *unused, int ncols, char **values, char **names) {
 
 // File helper
 static void create_test_file(const char *path, const char *content) {
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(path, "wb");
     if (f) {
         fputs(content, f);
         fclose(f);
@@ -329,9 +329,9 @@ TEST(memory_add_file) {
     snprintf(sql, sizeof(sql), "SELECT memory_add_file('%s');", filepath);
     ASSERT_SQL_OK(db, sql);
 
-    // Verify file path stored in dbmem_content
+    // Verify local provenance is stored separately from the logical path
     result_buf[0] = '\0';
-    snprintf(sql, sizeof(sql), "SELECT path FROM dbmem_content WHERE path = '%s';", filepath);
+    snprintf(sql, sizeof(sql), "SELECT source_path FROM dbmem_content_source WHERE source_path = '%s';", filepath);
     sqlite3_exec(db, sql, capture_string, NULL, NULL);
     ASSERT(strcmp(result_buf, filepath) == 0);
 

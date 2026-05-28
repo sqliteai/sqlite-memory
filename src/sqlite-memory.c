@@ -143,6 +143,8 @@ struct dbmem_context {
 
 static bool fts5_is_available = true;
 
+static char *dbmem_path_normalized_copy (const char *path);
+
 static int dbmem_bind_hash (sqlite3_stmt *vm, int index, uint64_t hash) {
     char hash_text[DBMEM_HASH_STR_MAXLEN];
     dbmem_hash_to_hex(hash, hash_text);
@@ -794,24 +796,32 @@ static void dbmem_database_delete_stale_source_path (sqlite3 *db, const char *so
     if (!source_path) return;
 
     sqlite3_stmt *vm = NULL;
+    char *normalized_source_path = dbmem_path_normalized_copy(source_path);
+    if (!normalized_source_path) return;
+
     int rc = sqlite3_prepare_v2(db,
         "SELECT c.hash FROM dbmem_content c "
         "JOIN dbmem_content_source s ON s.path = c.path "
         "WHERE s.source_path=?1;",
         -1, &vm, NULL);
-    if (rc != SQLITE_OK) return;
+    if (rc != SQLITE_OK) {
+        dbmemory_free(normalized_source_path);
+        return;
+    }
 
-    sqlite3_bind_text(vm, 1, source_path, -1, SQLITE_STATIC);
+    sqlite3_bind_text(vm, 1, normalized_source_path, -1, SQLITE_STATIC);
     rc = sqlite3_step(vm);
     if (rc == SQLITE_ROW) {
         uint64_t old_hash = 0;
         bool has_old_hash = dbmem_column_hash(vm, 0, &old_hash);
         sqlite3_finalize(vm);
+        dbmemory_free(normalized_source_path);
         if (has_old_hash && old_hash != new_hash) {
             dbmem_database_delete_hash(db, old_hash);
         }
     } else {
         sqlite3_finalize(vm);
+        dbmemory_free(normalized_source_path);
     }
 }
 
@@ -819,6 +829,9 @@ static int dbmem_database_set_source_path (sqlite3 *db, const char *path, const 
     if (!path || !path[0] || !source_path || !source_path[0]) return SQLITE_OK;
 
     sqlite3_stmt *vm = NULL;
+    char *normalized_source_path = dbmem_path_normalized_copy(source_path);
+    if (!normalized_source_path) return SQLITE_NOMEM;
+
     int rc = sqlite3_prepare_v2(db,
         "INSERT OR REPLACE INTO dbmem_content_source (path, source_path) VALUES (?1, ?2);",
         -1, &vm, NULL);
@@ -826,7 +839,7 @@ static int dbmem_database_set_source_path (sqlite3 *db, const char *path, const 
 
     rc = sqlite3_bind_text(vm, 1, path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
-    rc = sqlite3_bind_text(vm, 2, source_path, -1, SQLITE_STATIC);
+    rc = sqlite3_bind_text(vm, 2, normalized_source_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
 
     rc = sqlite3_step(vm);
@@ -834,6 +847,7 @@ static int dbmem_database_set_source_path (sqlite3 *db, const char *path, const 
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
+    dbmemory_free(normalized_source_path);
     return rc;
 }
 
@@ -1512,6 +1526,15 @@ static bool dbmem_path_separator (char c) {
     return c == '/' || c == '\\';
 }
 
+static bool dbmem_path_char_equal (char a, char b) {
+    if (dbmem_path_separator(a) && dbmem_path_separator(b)) return true;
+#ifdef _WIN32
+    if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+    if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+#endif
+    return a == b;
+}
+
 static bool dbmem_path_is_absolute (const char *path) {
     if (!path || !path[0]) return false;
     if (dbmem_path_separator(path[0])) return true;
@@ -1591,6 +1614,20 @@ static char *dbmem_path_copy_normalized (const char *path, size_t prefix_len) {
         copy[i] = dbmem_path_separator(relative[i]) ? '/' : relative[i];
     }
     copy[relative_len] = '\0';
+    return copy;
+}
+
+static char *dbmem_path_normalized_copy (const char *path) {
+    if (!path) return NULL;
+
+    size_t len = strlen(path);
+    char *copy = (char *)dbmemory_alloc((uint64_t)len + 1);
+    if (!copy) return NULL;
+
+    for (size_t i = 0; i < len; i++) {
+        copy[i] = dbmem_path_separator(path[i]) ? '/' : path[i];
+    }
+    copy[len] = '\0';
     return copy;
 }
 
@@ -3312,18 +3349,22 @@ cleanup:
 static bool dbmem_path_is_under_directory (const char *path, const char *dir_path) {
     if (!path || !dir_path) return false;
 
+    size_t path_len = strlen(path);
     size_t dir_len = strlen(dir_path);
     if (dir_len == 0) return false;
 
     while (dir_len > 1 && (dir_path[dir_len - 1] == '/' || dir_path[dir_len - 1] == '\\')) {
         dir_len--;
     }
+    if (path_len < dir_len) return false;
 
     if (dir_len == 1 && (dir_path[0] == '/' || dir_path[0] == '\\')) {
-        return path[0] == dir_path[0];
+        return dbmem_path_char_equal(path[0], dir_path[0]);
     }
 
-    if (strncmp(path, dir_path, dir_len) != 0) return false;
+    for (size_t i = 0; i < dir_len; i++) {
+        if (!dbmem_path_char_equal(path[i], dir_path[i])) return false;
+    }
     if (path[dir_len] == '\0') return true;
 
     return (path[dir_len] == '/' || path[dir_len] == '\\');
@@ -3356,11 +3397,8 @@ static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_pa
             if (!dbmem_path_is_under_directory(source_path, dir_path)) continue;
             exists = dbmem_file_exists(source_path);
         } else {
-            char *disk_path = dbmem_path_join_root(dir_path, path);
-            if (!disk_path) continue;
-            exists = dbmem_file_exists(disk_path);
-            dbmemory_free(disk_path);
-            if (dbmem_path_is_absolute(path) && !dbmem_path_is_under_directory(path, dir_path)) continue;
+            if (!dbmem_path_is_under_directory(path, dir_path)) continue;
+            exists = dbmem_file_exists(path);
         }
 
         if (exists) continue;
