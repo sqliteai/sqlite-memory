@@ -36,6 +36,7 @@ func ToolNames() []string {
 	return []string{
 		"memory_search",
 		"memory_add_file",
+		"memory_add_content",
 		"memory_add_directory",
 		"memory_add_text",
 		"memory_clear",
@@ -138,6 +139,11 @@ func tools() []map[string]any {
 			"path":    stringSchema("File path"),
 			"context": stringSchema("Context label"),
 		}, []string{"path"}),
+		tool("memory_add_content", map[string]any{
+			"path":    stringSchema("File name or path"),
+			"content": stringSchema("File content"),
+			"context": stringSchema("Context label"),
+		}, []string{"path", "content"}),
 		tool("memory_add_directory", map[string]any{
 			"path":    stringSchema("Directory path"),
 			"context": stringSchema("Context label"),
@@ -188,6 +194,8 @@ func (s Server) callTool(ctx context.Context, name string, args map[string]any) 
 		return memory.ResultsJSON(results), err
 	case "memory_add_file":
 		return "ok", memory.AddFile(ctx, s.DB, strArg(args, "path"), strArg(args, "context"))
+	case "memory_add_content":
+		return "ok", memory.AddContent(ctx, s.DB, strArg(args, "path"), strArg(args, "content"), strArg(args, "context"))
 	case "memory_add_directory":
 		return "ok", memory.AddDirectory(ctx, s.DB, strArg(args, "path"), strArg(args, "context"))
 	case "memory_add_text":

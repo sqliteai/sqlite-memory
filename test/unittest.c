@@ -1552,6 +1552,48 @@ TEST(sqlite_memory_version) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_is_enabled) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_is_enabled();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_is_enabled_missing_table) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db, "DROP TABLE dbmem_cache;", NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 1;
+    rc = exec_get_int(db, "SELECT memory_is_enabled();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_is_enabled_ignores_schema_version) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db, "DELETE FROM dbmem_settings WHERE key='schema_version';", NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 1;
+    rc = exec_get_int(db, "SELECT memory_is_enabled();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_clear_empty) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -1588,6 +1630,567 @@ TEST(sqlite_memory_delete_context_nonexistent) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_delete_file_direct) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 800), 'docs/delete.md', 'delete me', 9, 'ctx', 0), "
+        "(printf('%016x', 801), 'docs/keep.md', 'keep me', 7, 'ctx', 0);"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES "
+        "(printf('%016x', 800), 0, X'00000000', 0, 5), "
+        "(printf('%016x', 800), 1, X'00000000', 5, 4), "
+        "(printf('%016x', 801), 0, X'00000000', 0, 7);"
+        "INSERT INTO dbmem_vault_fts (content, hash, seq, context) VALUES "
+        "('delete chunk 1', printf('%016x', 800), 0, 'ctx'), "
+        "('delete chunk 2', printf('%016x', 800), 1, 'ctx'), "
+        "('keep chunk', printf('%016x', 801), 0, 'ctx');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_delete_file('docs/delete.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE hash = printf('%016x', 800);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash = printf('%016x', 800);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts WHERE hash = printf('%016x', 800);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE hash = printf('%016x', 801);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash = printf('%016x', 801);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts WHERE hash = printf('%016x', 801);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_file_missing) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 1;
+    int rc = exec_get_int(db, "SELECT memory_delete_file('missing.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_file_matches_source_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 802), 'docs/delete-source.md', 'delete me', 9, 'ctx', 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) VALUES "
+        "('docs/delete-source.md', '/tmp/delete-source.md');"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) VALUES "
+        "(printf('%016x', 802), 0, X'00000000', 0, 9);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_delete_file('/tmp/delete-source.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE hash = printf('%016x', 802);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_file_rejects_ambiguous_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 803), 'shared.md', 'one', 3, 'ctx', 0), "
+        "(printf('%016x', 804), 'other.md', 'two', 3, 'ctx', 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) VALUES "
+        "('shared.md', '/tmp/one.md'), "
+        "('other.md', 'shared.md');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_delete_file('shared.md');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    const char *msg = sqlite3_errmsg(db);
+    ASSERT(strstr(msg, "matched more than one row") != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_delete_file_invalid_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_delete_file('');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_delete_file(123);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_direct) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 780), 'docs/old.md', 'content', 7, 'ctx', 0);"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length) "
+        "VALUES (printf('%016x', 780), 0, X'00000000', 0, 7);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_rename_file('docs/old.md', 'docs/new.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char path[64];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content WHERE hash = printf('%016x', 780);", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path, "docs/new.md");
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'docs/old.md';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash = printf('%016x', 780);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_matches_source_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 782), 'docs/source-old.md', 'content', 7, 'ctx', 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) "
+        "VALUES ('docs/source-old.md', '/tmp/source-old.md');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_rename_file('/tmp/source-old.md', 'docs/source-new.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char path[64];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content WHERE hash = printf('%016x', 782);", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path, "docs/source-new.md");
+
+    char source_path[64];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source WHERE path = 'docs/source-new.md';", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, "/tmp/source-old.md");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_missing) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 1;
+    int rc = exec_get_int(db, "SELECT memory_rename_file('missing.md', 'new.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_duplicate_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 790), 'docs/a.md', 'a', 1, NULL, 0), "
+        "(printf('%016x', 791), 'docs/b.md', 'b', 1, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_rename_file('docs/a.md', 'docs/b.md');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path IN ('docs/a.md', 'docs/b.md');", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_rejects_ambiguous_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 792), 'shared.md', 'one', 3, NULL, 0), "
+        "(printf('%016x', 793), 'other.md', 'two', 3, NULL, 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) VALUES "
+        "('shared.md', '/tmp/one.md'), "
+        "('other.md', 'shared.md');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_rename_file('shared.md', 'renamed.md');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    const char *msg = sqlite3_errmsg(db);
+    ASSERT(strstr(msg, "matched more than one row") != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path IN ('shared.md', 'other.md');", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    sqlite3_close(db);
+}
+
+#ifdef _WIN32
+#define DBMEM_TEST_ABS_ROOT "C:\\dbmem\\project\\"
+#else
+#define DBMEM_TEST_ABS_ROOT "/tmp/dbmem/project/"
+#endif
+
+TEST(sqlite_memory_list_files_empty) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    char json[128];
+    int rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_strips_common_full_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 710), '" DBMEM_TEST_ABS_ROOT "zeta.md', 'v1', 2, NULL, 0), "
+        "(printf('%016x', 711), '" DBMEM_TEST_ABS_ROOT "docs/nested/beta.md', 'v2', 2, NULL, 0), "
+        "(printf('%016x', 712), '" DBMEM_TEST_ABS_ROOT "docs/alpha.md', 'v3', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[1024];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"directory\",\"name\":\"nested\",\"path\":\"docs/nested\",\"children\":[{\"type\":\"file\",\"name\":\"beta.md\",\"path\":\"docs/nested/beta.md\"}]},{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"docs/alpha.md\"}]},{\"type\":\"file\",\"name\":\"zeta.md\",\"path\":\"zeta.md\"}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_keeps_relative_paths) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 720), 'notes/zeta.md', 'v1', 2, NULL, 0), "
+        "(printf('%016x', 721), 'notes/docs/alpha.md', 'v2', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[1024];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"notes\",\"path\":\"notes\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"notes/docs\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"notes/docs/alpha.md\"}]},{\"type\":\"file\",\"name\":\"zeta.md\",\"path\":\"notes/zeta.md\"}]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_strips_single_full_path_directory) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 730), '" DBMEM_TEST_ABS_ROOT "docs/readme.md', 'v1', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[512];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"file\",\"name\":\"readme.md\",\"path\":\"readme.md\"}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_normalizes_windows_separators) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 740), 'C:\\dbmem\\project\\docs\\beta.md', 'v1', 2, NULL, 0), "
+        "(printf('%016x', 741), 'C:\\dbmem\\project\\alpha.md', 'v2', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[1024];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"beta.md\",\"path\":\"docs/beta.md\"}]},{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"alpha.md\"}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_does_not_strip_mixed_path_types) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 750), '/tmp/dbmem/project/readme.md', 'v1', 2, NULL, 0), "
+        "(printf('%016x', 751), 'notes/alpha.md', 'v2', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[2048];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"notes\",\"path\":\"notes\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"notes/alpha.md\"}]},{\"type\":\"directory\",\"name\":\"tmp\",\"path\":\"/tmp\",\"children\":[{\"type\":\"directory\",\"name\":\"dbmem\",\"path\":\"/tmp/dbmem\",\"children\":[{\"type\":\"directory\",\"name\":\"project\",\"path\":\"/tmp/dbmem/project\",\"children\":[{\"type\":\"file\",\"name\":\"readme.md\",\"path\":\"/tmp/dbmem/project/readme.md\"}]}]}]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_omits_empty_paths) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 760), '', 'text memory', 11, NULL, 0), "
+        "(printf('%016x', 761), 'docs/alpha.md', 'v2', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[512];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"docs/alpha.md\"}]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_escapes_json_strings) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 770), 'docs/a\"b.md', 'v1', 2, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[512];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"a\\\"b.md\",\"path\":\"docs/a\\\"b.md\"}]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_materialize_files_creates_directories_and_files) {
+    const char *base = TEST_TMP_DIR "/dbmem_materialize";
+    const char *docs = TEST_TMP_DIR "/dbmem_materialize/docs";
+    const char *nested = TEST_TMP_DIR "/dbmem_materialize/docs/nested";
+    const char *file1 = TEST_TMP_DIR "/dbmem_materialize/docs/nested/a.md";
+    const char *file2 = TEST_TMP_DIR "/dbmem_materialize/root.md";
+
+    remove_test_file(file1);
+    remove_test_file(file2);
+    rmdir_p(nested);
+    rmdir_p(docs);
+    rmdir_p(base);
+
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    char sql[2048];
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%%016x', 810), 'docs/nested/a.md', '# Nested\nContent from db.', 25, NULL, 0), "
+        "(printf('%%016x', 811), 'root.md', 'Root content', 12, NULL, 0);");
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    snprintf(sql, sizeof(sql), "SELECT memory_materialize_files('%s');", base);
+    rc = exec_get_int(db, sql, &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    int64_t len = 0;
+    char *content = dbmem_file_read(file1, &len);
+    ASSERT(content != NULL);
+    ASSERT_STR_EQ(content, "# Nested\nContent from db.");
+    dbmemory_free(content);
+
+    content = dbmem_file_read(file2, &len);
+    ASSERT(content != NULL);
+    ASSERT_STR_EQ(content, "Root content");
+    dbmemory_free(content);
+
+    sqlite3_close(db);
+    remove_test_file(file1);
+    remove_test_file(file2);
+    rmdir_p(nested);
+    rmdir_p(docs);
+    rmdir_p(base);
+}
+
+TEST(sqlite_memory_materialize_files_accepts_existing_same_content) {
+    const char *root = TEST_TMP_DIR;
+    const char *file = TEST_TMP_DIR "/dbmem_materialize_existing.md";
+    const char *content_text = "Already here.";
+
+    remove_test_file(file);
+    ASSERT_EQ(create_test_file(file, content_text), 0);
+
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    char sql[1024];
+    snprintf(sql, sizeof(sql),
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%%016x', 812), 'dbmem_materialize_existing.md', '%s', 13, NULL, 0);",
+        content_text);
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    snprintf(sql, sizeof(sql), "SELECT memory_materialize_files('%s');", root);
+    rc = exec_get_int(db, sql, &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    int64_t len = 0;
+    char *read_back = dbmem_file_read(file, &len);
+    ASSERT(read_back != NULL);
+    ASSERT_STR_EQ(read_back, content_text);
+    dbmemory_free(read_back);
+
+    sqlite3_close(db);
+    remove_test_file(file);
+}
+
+TEST(sqlite_memory_materialize_files_rejects_parent_segments) {
+    const char *root = TEST_TMP_DIR "/dbmem_materialize_safe";
+    const char *escaped = TEST_TMP_DIR "/dbmem_materialize_escape.md";
+
+    remove_test_file(escaped);
+    rmdir_p(root);
+    mkdir_p(root);
+
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 814), '../dbmem_materialize_escape.md', 'escape', 6, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "SELECT memory_materialize_files('%s');", root);
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    ASSERT(!dbmem_file_exists(escaped));
+
+    sqlite3_close(db);
+    rmdir_p(root);
+}
+
+TEST(sqlite_memory_materialize_files_rejects_null_content) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 813), 'missing-content.md', NULL, 0, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_materialize_files();", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_schema_has_timestamps) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -1599,8 +2202,16 @@ TEST(sqlite_schema_has_timestamps) {
         sql, sizeof(sql));
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT(strstr(sql, "hash TEXT PRIMARY KEY NOT NULL") != NULL);
+    ASSERT(strstr(sql, "source_path") == NULL);
     ASSERT(strstr(sql, "created_at") != NULL);
     ASSERT(strstr(sql, "last_accessed") != NULL);
+
+    rc = exec_get_text(db,
+        "SELECT sql FROM sqlite_master WHERE name='dbmem_content_source';",
+        sql, sizeof(sql));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(sql, "path TEXT PRIMARY KEY NOT NULL") != NULL);
+    ASSERT(strstr(sql, "source_path") != NULL);
 
     rc = exec_get_text(db,
         "SELECT sql FROM sqlite_master WHERE name='dbmem_vault';",
@@ -1621,7 +2232,7 @@ TEST(sqlite_schema_has_timestamps) {
     sqlite3_int64 schema_version = 0;
     rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'schema_version';", &schema_version);
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_EQ(schema_version, 2);
+    ASSERT_EQ(schema_version, 4);
 
     sqlite3_close(db);
 }
@@ -1673,9 +2284,53 @@ TEST(sqlite_schema_migrates_embedding_metadata) {
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(count, 0);
 
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM pragma_table_info('dbmem_content') WHERE name = 'source_path';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dbmem_content_source';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
     rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'schema_version';", &count);
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_EQ(count, 2);
+    ASSERT_EQ(count, 4);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_schema_migrates_source_path_to_local_table) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "CREATE TABLE dbmem_settings (key TEXT PRIMARY KEY, value TEXT);"
+        "INSERT INTO dbmem_settings (key, value) VALUES ('schema_version', '3');"
+        "CREATE TABLE dbmem_content (hash TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL DEFAULT '' UNIQUE, source_path TEXT DEFAULT NULL, value TEXT DEFAULT NULL, length INTEGER NOT NULL DEFAULT 0, context TEXT DEFAULT NULL, created_at INTEGER DEFAULT 0, last_accessed INTEGER DEFAULT 0);"
+        "INSERT INTO dbmem_content (hash, path, source_path, value, length, context, created_at, last_accessed) "
+        "VALUES (printf('%016x', 998), 'docs/local.md', '/tmp/local.md', 'content', 7, 'ctx', 11, 12);"
+        "CREATE TABLE dbmem_vault (hash TEXT NOT NULL, seq INTEGER NOT NULL, embedding BLOB NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, n_tokens INTEGER NOT NULL DEFAULT 0, truncated INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hash, seq));"
+        "CREATE TABLE dbmem_cache (text_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, embedding BLOB NOT NULL, dimension INTEGER NOT NULL, n_tokens INTEGER NOT NULL DEFAULT 0, truncated INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (text_hash, provider, model));",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM pragma_table_info('dbmem_content') WHERE name = 'source_path';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    char source_path[64];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source WHERE path = 'docs/local.md';", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, "/tmp/local.md");
+
+    rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'schema_version';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 4);
 
     sqlite3_close(db);
 }
@@ -1714,7 +2369,9 @@ TEST(sqlite_memory_delete_direct) {
     // Insert a test record directly
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
-        "VALUES (printf('%016x', 456), 'test/path2', 'test value 2', 12, 'ctx2', strftime('%s','now'));",
+        "VALUES (printf('%016x', 456), 'test/path2', 'test value 2', 12, 'ctx2', strftime('%s','now'));"
+        "INSERT INTO dbmem_content_source (path, source_path) "
+        "VALUES ('test/path2', '/tmp/test/path2');",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1730,6 +2387,10 @@ TEST(sqlite_memory_delete_direct) {
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(count, 0);
 
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content_source;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
     sqlite3_close(db);
 }
 
@@ -1742,7 +2403,11 @@ TEST(sqlite_memory_delete_context_direct) {
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
         "(printf('%016x', 100), 'path1', 'v1', 2, 'ctx_a', 0), "
         "(printf('%016x', 101), 'path2', 'v2', 2, 'ctx_a', 0), "
-        "(printf('%016x', 102), 'path3', 'v3', 2, 'ctx_b', 0);",
+        "(printf('%016x', 102), 'path3', 'v3', 2, 'ctx_b', 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) VALUES "
+        "('path1', '/tmp/path1'), "
+        "('path2', '/tmp/path2'), "
+        "('path3', '/tmp/path3');",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1764,6 +2429,15 @@ TEST(sqlite_memory_delete_context_direct) {
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_STR_EQ(context, "ctx_b");
 
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content_source;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    char source_path[64];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source;", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, "/tmp/path3");
+
     sqlite3_close(db);
 }
 
@@ -1775,7 +2449,10 @@ TEST(sqlite_memory_clear_direct) {
     int rc = sqlite3_exec(db,
         "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
         "(printf('%016x', 200), 'p1', 'v1', 2, 'c1', 0), "
-        "(printf('%016x', 201), 'p2', 'v2', 2, 'c2', 0);",
+        "(printf('%016x', 201), 'p2', 'v2', 2, 'c2', 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) VALUES "
+        "('p1', '/tmp/p1'), "
+        "('p2', '/tmp/p2');",
         NULL, NULL, NULL);
     ASSERT_EQ(rc, SQLITE_OK);
 
@@ -1788,6 +2465,10 @@ TEST(sqlite_memory_clear_direct) {
     // Verify all gone
     sqlite3_int64 count;
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content_source;", &count);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(count, 0);
 
@@ -2611,6 +3292,378 @@ static void dummy_free(void *engine, void *xdata) {
     free(engine);
 }
 
+TEST(sqlite_memory_add_content_uses_explicit_content_and_context) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *path = "docs/dbmem_explicit_content.md";
+    const char *disk_content = "This content came from disk.";
+    const char *explicit_content = "# Explicit Content\nThis content came from the SQL argument.";
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2, ?3);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, explicit_content, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, "sync-context", -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    ASSERT_EQ(sqlite3_column_int64(stmt, 0), 1);
+    sqlite3_finalize(stmt);
+
+    char value[256];
+    rc = exec_get_text(db, "SELECT value FROM dbmem_content;", value, sizeof(value));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(value, explicit_content);
+    ASSERT(strstr(value, disk_content) == NULL);
+
+    char stored_path[256];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content;", stored_path, sizeof(stored_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(stored_path, "docs/dbmem_explicit_content.md");
+
+    sqlite3_int64 source_count = 1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content_source;", &source_count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(source_count, 0);
+
+    char context[64];
+    rc = exec_get_text(db, "SELECT context FROM dbmem_content;", context, sizeof(context));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(context, "sync-context");
+
+    char indexed_content[256];
+    rc = exec_get_text(db, "SELECT group_concat(content, '\n') FROM dbmem_vault_fts;", indexed_content, sizeof(indexed_content));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(indexed_content, "Explicit Content") != NULL);
+    ASSERT(strstr(indexed_content, "SQL argument") != NULL);
+    ASSERT(strstr(indexed_content, "disk") == NULL);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_removes_stale_path_when_new_content_is_deduped) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    const char *old_content = "# A\nOld content.";
+    const char *shared_content = "# Shared\nSame content.";
+    uint64_t old_hash = dbmem_hash_compute(old_content, strlen(old_content));
+    char old_hash_text[DBMEM_HASH_STR_MAXLEN];
+    dbmem_hash_to_hex(old_hash, old_hash_text);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "docs/a.md", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, old_content, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "docs/b.md", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, shared_content, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "docs/a.md", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, shared_content, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'docs/a.md';", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char path[64];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content;", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path, "docs/b.md");
+
+    char *sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%q';", old_hash_text);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_file_reads_disk_and_stores_context) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *dir = TEST_TMP_DIR "/dbmem_file_context_dir";
+    const char *path = TEST_TMP_DIR "/dbmem_file_context_dir/note.md";
+    const char *disk_content = "# File Context\nThis content came from disk.";
+
+    remove_test_file(path);
+    rmdir_p(dir);
+    mkdir_p(dir);
+    ASSERT_EQ(create_test_file(path, disk_content), 0);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, "file-context", -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    ASSERT_EQ(sqlite3_column_int64(stmt, 0), 1);
+    sqlite3_finalize(stmt);
+
+    char value[256];
+    rc = exec_get_text(db, "SELECT value FROM dbmem_content;", value, sizeof(value));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(value, disk_content);
+
+    char stored_path[256];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content;", stored_path, sizeof(stored_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(stored_path, "dbmem_file_context_dir/note.md") != NULL);
+
+    char source_path[256];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source;", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, path);
+
+    char context[64];
+    rc = exec_get_text(db, "SELECT context FROM dbmem_content;", context, sizeof(context));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(context, "file-context");
+
+    remove_test_file(path);
+    rmdir_p(dir);
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_file_attaches_source_path_to_existing_logical_path) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *dir = TEST_TMP_DIR "/dbmem_attach_source";
+    const char *path = TEST_TMP_DIR "/dbmem_attach_source/note.md";
+    const char *content = "# Local\nUpdated content.";
+
+    remove_test_file(path);
+    rmdir_p(dir);
+    mkdir_p(dir);
+    ASSERT_EQ(create_test_file(path, content), 0);
+
+    uint64_t hash = dbmem_hash_compute(content, strlen(content));
+    char hash_text[DBMEM_HASH_STR_MAXLEN];
+    dbmem_hash_to_hex(hash, hash_text);
+
+    char *sql = sqlite3_mprintf(
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES ('%q', 'dbmem_attach_source/note.md', '%q', %d, 'ctx', 0);",
+        hash_text, content, (int)strlen(content));
+    ASSERT(sql != NULL);
+    int rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1, 'ctx');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    sqlite3_int64 count = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dbmem_attach_source/note.md';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    char source_path[256];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source;", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, path);
+
+    remove_test_file(path);
+    rmdir_p(dir);
+    sqlite3_close(db);
+}
+
+#ifndef _WIN32
+TEST(sqlite_memory_add_file_disambiguates_parent_collisions) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *dir1 = TEST_TMP_DIR "/dbmem_suffix_one/a";
+    const char *dir2 = TEST_TMP_DIR "/dbmem_suffix_two/a";
+    const char *base1 = TEST_TMP_DIR "/dbmem_suffix_one";
+    const char *base2 = TEST_TMP_DIR "/dbmem_suffix_two";
+    const char *file1 = TEST_TMP_DIR "/dbmem_suffix_one/a/readme.md";
+    const char *file2 = TEST_TMP_DIR "/dbmem_suffix_two/a/readme.md";
+
+    remove_test_file(file1);
+    remove_test_file(file2);
+    rmdir_p(dir1);
+    rmdir_p(dir2);
+    rmdir_p(base1);
+    rmdir_p(base2);
+    mkdir_p(base1);
+    mkdir_p(base2);
+    mkdir_p(dir1);
+    mkdir_p(dir2);
+    ASSERT_EQ(create_test_file(file1, "# One\nFirst file."), 0);
+    ASSERT_EQ(create_test_file(file2, "# Two\nSecond file."), 0);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, file1, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, file2, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    char paths[256];
+    rc = exec_get_text(db, "SELECT group_concat(path, '|') FROM dbmem_content ORDER BY path;", paths, sizeof(paths));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strstr(paths, "a/readme.md") != NULL);
+    ASSERT(strstr(paths, "dbmem_suffix_two/a/readme.md") != NULL);
+
+    char source_path[256];
+    rc = exec_get_text(db,
+        "SELECT s.source_path FROM dbmem_content_source s "
+        "JOIN dbmem_content c ON c.path = s.path WHERE c.path = 'a/readme.md';",
+        source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, file1);
+
+    remove_test_file(file1);
+    remove_test_file(file2);
+    rmdir_p(dir1);
+    rmdir_p(dir2);
+    rmdir_p(base1);
+    rmdir_p(base2);
+    sqlite3_close(db);
+}
+#endif
+
+TEST(sqlite_memory_add_directory_stores_relative_paths) {
+    const char *base = TEST_TMP_DIR "/dbmem_relative_scan";
+    const char *nested = TEST_TMP_DIR "/dbmem_relative_scan/nested";
+    const char *file = TEST_TMP_DIR "/dbmem_relative_scan/nested/note.md";
+
+    remove_test_file(file);
+    rmdir_p(nested);
+    rmdir_p(base);
+    mkdir_p(base);
+    mkdir_p(nested);
+    ASSERT_EQ(create_test_file(file, "# Note\nRelative path."), 0);
+
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char sql[512];
+    snprintf(sql, sizeof(sql), "SELECT memory_add_directory('%s');", base);
+    rc = exec_get_int(db, sql, &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char stored_path[256];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content;", stored_path, sizeof(stored_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(stored_path, "nested/note.md");
+
+    char source_path[256];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source;", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, file);
+
+    sqlite3_close(db);
+    remove_test_file(file);
+    rmdir_p(nested);
+    rmdir_p(base);
+}
+
+TEST(sqlite_memory_add_content_rejects_non_text_content) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_add_content('docs/readme.md', 123);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -2797,6 +3850,70 @@ TEST(sqlite_custom_provider_add_text) {
     rc = exec_get_int(db, "SELECT truncated FROM dbmem_vault LIMIT 1;", &result);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_reindex_refreshes_synced_value_changes) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    const char *path = "docs/synced.md";
+    const char *old_value = "# Old\nBefore sync.";
+    const char *new_value = "# New\nAfter sync merge.";
+    uint64_t old_hash = dbmem_hash_compute(old_value, strlen(old_value));
+    uint64_t new_hash = dbmem_hash_compute(new_value, strlen(new_value));
+    char old_hash_text[DBMEM_HASH_STR_MAXLEN];
+    char new_hash_text[DBMEM_HASH_STR_MAXLEN];
+    dbmem_hash_to_hex(old_hash, old_hash_text);
+    dbmem_hash_to_hex(new_hash, new_hash_text);
+
+    char *sql = sqlite3_mprintf(
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES ('%q', '%q', '%q', %d, 'sync', 0);"
+        "INSERT INTO dbmem_content_source (path, source_path) "
+        "VALUES ('%q', '/tmp/synced.md');"
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length, n_tokens, truncated) "
+        "VALUES ('%q', 0, X'00000000000000000000000000000000', 0, 4, 1, 0);",
+        old_hash_text, path, new_value, (int)strlen(new_value),
+        path, old_hash_text);
+    ASSERT(sql != NULL);
+    rc = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_reindex();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char stored_hash[DBMEM_HASH_STR_MAXLEN];
+    rc = exec_get_text(db, "SELECT hash FROM dbmem_content WHERE path = 'docs/synced.md';", stored_hash, sizeof(stored_hash));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(stored_hash, new_hash_text);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash = (SELECT hash FROM dbmem_content WHERE path = 'docs/synced.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%q';", old_hash_text);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    char source_path[64];
+    rc = exec_get_text(db, "SELECT source_path FROM dbmem_content_source WHERE path = 'docs/synced.md';", source_path, sizeof(source_path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(source_path, "/tmp/synced.md");
 
     sqlite3_close(db);
 }
@@ -3202,11 +4319,37 @@ int main(int argc, char *argv[]) {
 #ifdef TEST_SQLITE_EXTENSION
     printf("\nSQLite extension tests:\n");
     RUN_TEST(sqlite_memory_version);
+    RUN_TEST(sqlite_memory_is_enabled);
+    RUN_TEST(sqlite_memory_is_enabled_missing_table);
+    RUN_TEST(sqlite_memory_is_enabled_ignores_schema_version);
     RUN_TEST(sqlite_memory_clear_empty);
     RUN_TEST(sqlite_memory_delete_nonexistent);
     RUN_TEST(sqlite_memory_delete_context_nonexistent);
+    RUN_TEST(sqlite_memory_delete_file_direct);
+    RUN_TEST(sqlite_memory_delete_file_missing);
+    RUN_TEST(sqlite_memory_delete_file_matches_source_path);
+    RUN_TEST(sqlite_memory_delete_file_rejects_ambiguous_path);
+    RUN_TEST(sqlite_memory_delete_file_invalid_path);
+    RUN_TEST(sqlite_memory_rename_file_direct);
+    RUN_TEST(sqlite_memory_rename_file_matches_source_path);
+    RUN_TEST(sqlite_memory_rename_file_missing);
+    RUN_TEST(sqlite_memory_rename_file_duplicate_path);
+    RUN_TEST(sqlite_memory_rename_file_rejects_ambiguous_path);
+    RUN_TEST(sqlite_memory_list_files_empty);
+    RUN_TEST(sqlite_memory_list_files_strips_common_full_path);
+    RUN_TEST(sqlite_memory_list_files_keeps_relative_paths);
+    RUN_TEST(sqlite_memory_list_files_strips_single_full_path_directory);
+    RUN_TEST(sqlite_memory_list_files_normalizes_windows_separators);
+    RUN_TEST(sqlite_memory_list_files_does_not_strip_mixed_path_types);
+    RUN_TEST(sqlite_memory_list_files_omits_empty_paths);
+    RUN_TEST(sqlite_memory_list_files_escapes_json_strings);
+    RUN_TEST(sqlite_memory_materialize_files_creates_directories_and_files);
+    RUN_TEST(sqlite_memory_materialize_files_accepts_existing_same_content);
+    RUN_TEST(sqlite_memory_materialize_files_rejects_parent_segments);
+    RUN_TEST(sqlite_memory_materialize_files_rejects_null_content);
     RUN_TEST(sqlite_schema_has_timestamps);
     RUN_TEST(sqlite_schema_migrates_embedding_metadata);
+    RUN_TEST(sqlite_schema_migrates_source_path_to_local_table);
     RUN_TEST(sqlite_direct_insert_with_timestamp);
     RUN_TEST(sqlite_memory_delete_direct);
     RUN_TEST(sqlite_memory_delete_context_direct);
@@ -3248,8 +4391,18 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_set_model);
     RUN_TEST(sqlite_memory_add_text_requires_model);
     RUN_TEST(sqlite_custom_provider_add_text);
+    RUN_TEST(sqlite_memory_reindex_refreshes_synced_value_changes);
     RUN_TEST(sqlite_custom_provider_skips_whitespace_only_text);
     RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
+    RUN_TEST(sqlite_memory_add_content_uses_explicit_content_and_context);
+    RUN_TEST(sqlite_memory_add_content_removes_stale_path_when_new_content_is_deduped);
+    RUN_TEST(sqlite_memory_add_file_reads_disk_and_stores_context);
+    RUN_TEST(sqlite_memory_add_file_attaches_source_path_to_existing_logical_path);
+#ifndef _WIN32
+    RUN_TEST(sqlite_memory_add_file_disambiguates_parent_collisions);
+#endif
+    RUN_TEST(sqlite_memory_add_directory_stores_relative_paths);
+    RUN_TEST(sqlite_memory_add_content_rejects_non_text_content);
     RUN_TEST(sqlite_mdx_preprocessing_applies_only_to_mdx_files);
     RUN_TEST(sqlite_custom_provider_null_callbacks);
     RUN_TEST(sqlite_custom_provider_init_error);

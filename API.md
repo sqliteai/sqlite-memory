@@ -11,6 +11,7 @@ A SQLite extension that provides semantic memory capabilities with hybrid search
   - [General Functions](#general-functions)
   - [Configuration Functions](#configuration-functions)
   - [Memory Management Functions](#memory-management-functions)
+  - [Listing Functions](#listing-functions)
   - [Deletion Functions](#deletion-functions)
   - [Sync Functions](#sync-functions)
 - [Virtual Table Module](#virtual-table-module)
@@ -86,12 +87,33 @@ Returns the extension version string.
 
 **Parameters:** None
 
-**Returns:** TEXT - Version string (e.g., "0.5.0")
+**Returns:** TEXT - Version string (e.g., "1.3.0")
 
 **Example:**
 ```sql
 SELECT memory_version();
--- Returns: "0.5.0"
+-- Returns: "1.3.0"
+```
+
+---
+
+#### `memory_is_enabled()`
+
+Returns whether the current database has the sqlite-memory schema enabled.
+
+**Parameters:** None
+
+**Returns:** INTEGER - 1 if the required sqlite-memory tables are present, 0 otherwise
+
+**Notes:**
+- This checks database state, not whether the extension has been loaded into the current connection
+- This is not a schema compatibility check; migrations still use `schema_version`
+- `dbmem_vault_fts` is not required because FTS5 support is optional
+
+**Example:**
+```sql
+SELECT memory_is_enabled();
+-- Returns: 1
 ```
 
 ---
@@ -124,8 +146,8 @@ Configures the embedding model to use.
 SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 
 -- Remote embedding via vectors.space (requires free API key)
-SELECT memory_set_model('openai', 'text-embedding-3-small');
 SELECT memory_set_apikey('your-vectorspace-api-key');
+SELECT memory_set_model('openai', 'text-embedding-3-small');
 ```
 
 ---
@@ -235,19 +257,22 @@ SELECT memory_add_text('Important meeting notes from 2024-01-15...', 'meetings')
 
 #### `memory_add_file(path TEXT [, context TEXT])`
 
-Syncs a file to memory. Unchanged files are skipped; modified files are atomically replaced.
+Reads a file from disk and syncs it to memory.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `path` | TEXT | Yes | Full path to the file |
-| `context` | TEXT | No | Optional context label for grouping memories |
+| `path` | TEXT | Yes | File path. Absolute filesystem paths are stored as a portable logical suffix; relative paths are stored as-is |
+| `context` | TEXT | No | Optional context label for grouping and sync filters |
 
 **Returns:** INTEGER - 1 on success
 
 **Notes:**
 - Only processes files matching configured extensions (default: `md,mdx`)
-- File path is stored in `dbmem_content.path`
+- File path is stored in `dbmem_content.path` as a portable relative path
+- The original local filesystem path is stored in local-only `dbmem_content_source.source_path`, keyed by logical `path`
+- For absolute files, the initial logical path is `parent/file` (for example `/Users/me/docs/readme.md` becomes `docs/readme.md`); if that collides, sqlite-memory extends the suffix until it is unique
+- If the same logical `path` already exists without local provenance (for example after sync), importing a local file with that logical path updates the existing entry and attaches local provenance instead of creating a duplicate
 - If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is deleted and new content is reindexed — all within a single SAVEPOINT transaction (see [Sync Behavior](#sync-behavior))
 - Not available when compiled with `DBMEM_OMIT_IO`
 
@@ -255,6 +280,60 @@ Syncs a file to memory. Unchanged files are skipped; modified files are atomical
 ```sql
 SELECT memory_add_file('/docs/readme.md');
 SELECT memory_add_file('/docs/api.md', 'documentation');
+```
+
+---
+
+#### `memory_add_content(path TEXT, content TEXT [, context TEXT])`
+
+Indexes caller-provided file content without reading from the filesystem.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | TEXT | Yes | File name or path to store in `dbmem_content.path` |
+| `content` | TEXT | Yes | File content to index |
+| `context` | TEXT | No | Optional context label for grouping and sync filters |
+
+**Returns:** INTEGER - 1 on success
+
+**Notes:**
+- The file does not need to exist on disk
+- Absolute paths are stored as portable logical suffixes; relative paths are stored as-is
+- No row is added to `dbmem_content_source` because content was supplied by the caller rather than read from the local filesystem
+- If the path was previously indexed with different content, the old entry (chunks, embeddings, FTS) is deleted and new content is reindexed
+- If the new content is already indexed under another path, the stale path is removed and the existing content entry is reused
+- Available even when compiled with `DBMEM_OMIT_IO`
+
+**Example:**
+```sql
+SELECT memory_add_content('docs/api.md', '# API\nContent already loaded by the caller.', 'documentation');
+```
+
+---
+
+#### `memory_rename_file(old_path TEXT, new_path TEXT)`
+
+Renames an indexed file path in memory without reprocessing content.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `old_path` | TEXT | Yes | Existing logical path stored in `dbmem_content.path`, or exact local `dbmem_content_source.source_path` |
+| `new_path` | TEXT | Yes | New path to store in `dbmem_content.path` |
+
+**Returns:** INTEGER - Number of content entries renamed (0 or 1)
+
+**Notes:**
+- Updates `dbmem_content.path` and keeps any local `dbmem_content_source` metadata attached to the renamed logical path
+- It does not rename the file on disk or change the stored `source_path` value
+- Does not change `hash`, `value`, embeddings, or FTS entries
+- Fails if `new_path` already exists because `dbmem_content.path` is unique
+- Fails if `old_path` matches more than one row across `path` and local `dbmem_content_source.source_path`; pass a unique logical path or exact local source path
+
+**Example:**
+```sql
+SELECT memory_rename_file('/docs/old.md', '/docs/new.md');
 ```
 
 ---
@@ -269,10 +348,12 @@ Synchronizes a directory with memory. Adds new files, reindexes modified files, 
 | `path` | TEXT | Yes | Full path to the directory |
 | `context` | TEXT | No | Optional context label applied to all files |
 
-**Returns:** INTEGER - Number of new files processed
+**Returns:** INTEGER - Number of files scanned successfully
 
 **Notes:**
 - Recursively scans subdirectories
+- File paths are stored relative to the directory path passed to `memory_add_directory`
+- Each filesystem-backed row stores the original local file path in local-only `dbmem_content_source.source_path`
 - Only processes files matching configured extensions
 - **Phase 1 — Cleanup**: Removes entries for files that no longer exist on disk
 - **Phase 2 — Scan**: Processes all matching files:
@@ -286,27 +367,77 @@ Synchronizes a directory with memory. Adds new files, reindexes modified files, 
 **Example:**
 ```sql
 SELECT memory_add_directory('/path/to/docs');
--- Returns: 42 (number of new files processed)
+-- Returns: 42 (number of files scanned successfully)
 
 SELECT memory_add_directory('/project/notes', 'project-notes');
 
 -- Safe to call again — unchanged files are skipped
 SELECT memory_add_directory('/path/to/docs');
--- Returns: 0 (nothing changed)
+-- Returns the number of files scanned; unchanged files are skipped internally
+```
+
+---
+
+#### `memory_materialize_files([root_path TEXT])`
+
+Writes all stored file contents from `dbmem_content` back to the filesystem.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `root_path` | TEXT | No | Filesystem root used to materialize relative paths |
+
+**Returns:** INTEGER - Number of files processed
+
+**Notes:**
+- Creates parent directories as needed
+- Relative paths are written under `root_path` when provided
+- Paths containing `..` segments are rejected to prevent writing outside the materialization root
+- If a file already exists with the same content, it is left unchanged and no error is returned
+- If a file exists with different content, it is overwritten with `dbmem_content.value`
+- Rows with `NULL` content cannot be materialized
+- Not available when compiled with `DBMEM_OMIT_IO`
+
+**Example:**
+```sql
+SELECT memory_materialize_files('/path/to/project');
+```
+
+---
+
+### Listing Functions
+
+#### `memory_list_files()`
+
+Returns a JSON tree with the indexed directories and files stored in `dbmem_content.path`.
+
+**Returns:** TEXT - JSON object with a `root` string and a hierarchical `children` array
+
+**Notes:**
+- Rows added with `memory_add_text()` use generated paths and can appear as root-level file nodes
+- Legacy absolute paths are displayed with their common directory prefix removed when possible
+- Directory nodes are derived from indexed file paths
+- Path separators are normalized to `/` in the returned JSON
+- Sibling nodes are sorted with directories first, then files; each group is alphabetical
+
+**Example:**
+```sql
+SELECT memory_list_files();
+-- {"root":"","children":[{"type":"directory","name":"docs","path":"docs","children":[{"type":"file","name":"readme.md","path":"docs/readme.md"}]}]}
 ```
 
 ---
 
 ### Deletion Functions
 
-#### `memory_delete(hash INTEGER)`
+#### `memory_delete(hash TEXT)`
 
 Deletes a specific memory by its hash.
 
 **Parameters:**
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `hash` | INTEGER | The hash identifier of the memory to delete |
+| `hash` | TEXT | The 16-character hexadecimal hash identifier of the memory to delete |
 
 **Returns:** INTEGER - Number of content entries deleted (0 or 1)
 
@@ -321,7 +452,7 @@ Deletes a specific memory by its hash.
 SELECT hash FROM dbmem_content WHERE path LIKE '%readme%';
 
 -- Delete by hash
-SELECT memory_delete(1234567890);
+SELECT memory_delete('9e3779b97f4a7c15');
 ```
 
 ---
@@ -350,6 +481,30 @@ SELECT memory_delete_context('meetings');
 
 ---
 
+#### `memory_delete_file(path TEXT)`
+
+Deletes an indexed file by its stored path.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `path` | TEXT | Exact logical path stored in `dbmem_content.path`, or exact local `dbmem_content_source.source_path` |
+
+**Returns:** INTEGER - Number of content entries deleted (0 or 1)
+
+**Notes:**
+- Atomically deletes the matching `dbmem_content` entry and its rows in `dbmem_vault` and `dbmem_vault_fts`
+- Does not delete or modify the file on disk
+- Path matching is exact; if a row has local source metadata, `dbmem_content_source.source_path` is also accepted
+- Fails if the argument matches more than one row across `path` and local `dbmem_content_source.source_path`
+
+**Example:**
+```sql
+SELECT memory_delete_file('/docs/readme.md');
+```
+
+---
+
 #### `memory_clear()`
 
 Deletes all memories from the database.
@@ -359,7 +514,7 @@ Deletes all memories from the database.
 **Returns:** INTEGER - 1 on success
 
 **Notes:**
-- Clears `dbmem_content`, `dbmem_vault`, and `dbmem_vault_fts`
+- Clears `dbmem_content`, local `dbmem_content_source`, `dbmem_vault`, and `dbmem_vault_fts`
 - Does not delete settings from `dbmem_settings`
 - Does not clear the embedding cache (`dbmem_cache`)
 - Uses SAVEPOINT transaction for atomicity
@@ -419,6 +574,8 @@ Enables CRDT-based synchronization for `dbmem_content` via sqlite-sync. Uses the
 - With arguments, sets a row-level filter: only the specified contexts are replicated
 - Block-level LWW on `value` enables line-level conflict resolution for text content
 - All other columns use the default CLS algorithm
+- `source_path` is not part of `dbmem_content`; it is stored in local-only `dbmem_content_source` and is not synchronized
+- After sync merges remote changes into `dbmem_content.value`, `dbmem_content.hash` can be stale and local embeddings in `dbmem_vault` can still point to the previous content. Run `memory_reindex()` to recompute changed hashes and generate or refresh local embeddings
 
 **Example:**
 ```sql
@@ -427,6 +584,9 @@ SELECT memory_enable_sync();
 
 -- Sync only specific contexts
 SELECT memory_enable_sync('conversation', 'project-docs');
+
+-- After receiving synced content from other clients
+SELECT memory_reindex();
 ```
 
 ---
@@ -450,6 +610,28 @@ SELECT memory_disable_sync();
 
 ---
 
+#### `memory_reindex()`
+
+Generates or refreshes local embeddings for stored content.
+
+**Parameters:** None
+
+**Returns:** INTEGER - Number of content rows reindexed or realigned
+
+**Notes:**
+- Requires an embedding model configured with `memory_set_model()`
+- Processes rows in `dbmem_content` that have stored `value`
+- Skips rows whose `dbmem_content.hash` already matches `value` and whose local `dbmem_vault` entries already exist
+- After sync merges remote changes into `dbmem_content.value`, recomputes stale hashes, refreshes missing embeddings, and removes old local index rows
+- Useful after receiving synced content because `dbmem_vault`, `dbmem_vault_fts`, and `dbmem_content_source` are local-only and are not synchronized
+
+**Example:**
+```sql
+SELECT memory_reindex();
+```
+
+---
+
 ### `memory_search`
 
 A virtual table for performing hybrid semantic search.
@@ -469,10 +651,10 @@ SELECT * FROM memory_search WHERE query = 'search text';
 **Output columns:**
 | Column | Type | Description |
 |--------|------|-------------|
-| `hash` | INTEGER | Content hash identifier |
+| `hash` | TEXT | 16-character hexadecimal content hash |
 | `seq` | INTEGER | Chunk sequence number within the document (0-based) |
 | `ranking` | REAL | Combined similarity score (0.0 - 1.0) |
-| `path` | TEXT | Source file path or generated UUID for text content |
+| `path` | TEXT | Portable logical file path or generated UUID for text content |
 | `snippet` | TEXT | Text snippet from the matching chunk |
 
 **Notes:**
@@ -655,7 +837,7 @@ The extension tracks two timestamps for each memory:
 
 ### `created_at`
 
-- Set automatically when content is added via `memory_add_text`, `memory_add_file`, or `memory_add_directory`
+- Set automatically when content is added via `memory_add_text`, `memory_add_file`, `memory_add_content`, or `memory_add_directory`
 - Stored as Unix timestamp (seconds since 1970-01-01 00:00:00 UTC)
 - Never updated after initial creation
 
@@ -772,7 +954,7 @@ ORDER BY last_accessed DESC
 LIMIT 10;
 
 -- Tokens consumed and truncation per context
--- (n_tokens / truncated were added in schema version 2)
+-- (n_tokens / truncated were added in schema version 2; dbmem_content_source was added in schema version 3; source_path moved out of dbmem_content and became path-keyed in schema version 4)
 SELECT
     COALESCE(c.context, '(none)') as context,
     SUM(v.n_tokens) as tokens_processed,
@@ -793,7 +975,7 @@ WHERE truncated = 1;
 
 | Option | Description |
 |--------|-------------|
-| `DBMEM_OMIT_IO` | Omit file/directory functions (for WASM) |
+| `DBMEM_OMIT_IO` | Omit filesystem-backed functions: `memory_add_file`, `memory_add_directory`, and `memory_materialize_files` (for WASM) |
 | `DBMEM_OMIT_LOCAL_ENGINE` | Omit llama.cpp local engine (for remote-only builds) |
 | `DBMEM_OMIT_REMOTE_ENGINE` | Omit vectors.space remote engine (for local-only builds) |
 | `SQLITE_CORE` | Compile as part of SQLite core (not as loadable extension) |
@@ -813,5 +995,5 @@ Errors can be caught using standard SQLite error handling mechanisms.
 ```sql
 -- Example error handling in application code
 SELECT memory_add_text(123);  -- Error: expects TEXT parameter
-SELECT memory_delete('abc');  -- Error: expects INTEGER parameter
+SELECT memory_delete(123);    -- Error: expects TEXT parameter
 ```

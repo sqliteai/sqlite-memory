@@ -249,6 +249,7 @@ Available MCP tools:
 ```text
 memory_search
 memory_add_file
+memory_add_content
 memory_add_directory
 memory_add_text
 memory_clear

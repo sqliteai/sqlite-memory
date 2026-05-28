@@ -16,6 +16,7 @@ func TestToolNames(t *testing.T) {
 	want := map[string]bool{
 		"memory_search":         true,
 		"memory_add_file":       true,
+		"memory_add_content":    true,
 		"memory_add_directory":  true,
 		"memory_add_text":       true,
 		"memory_clear":          true,

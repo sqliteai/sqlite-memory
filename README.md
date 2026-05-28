@@ -139,6 +139,7 @@ systems, and AI applications.', 'concepts');
 
 -- Add an entire documentation directory
 SELECT memory_add_directory('/path/to/docs', 'project-docs');
+-- Paths are stored relative to /path/to/docs, so the database can be materialized elsewhere.
 
 -- Search your memory semantically
 SELECT path, snippet, ranking
@@ -212,12 +213,13 @@ memories = recall("what's the project timeline")
 All `memory_add_*` functions use content-hash change detection to avoid redundant work:
 
 - **`memory_add_text`**: Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
-- **`memory_add_file`**: Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped.
+- **`memory_add_file`**: Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped. Absolute file paths are stored as portable logical suffixes, while the original local path is retained only in local metadata.
+- **`memory_add_content`**: Indexes caller-provided file content without reading from the filesystem, preserving the supplied logical file name/path and optional context.
 - **`memory_add_directory`**: Performs a full two-phase sync:
   1. **Cleanup**: Removes database entries for files that no longer exist on disk
-  2. **Scan**: Recursively processes all matching files - adding new ones, replacing modified ones, and skipping unchanged ones
+  2. **Scan**: Recursively processes all matching files - adding new ones, replacing modified ones, and skipping unchanged ones. Stored paths are relative to the scanned directory root, with local provenance retained only in local metadata.
 
-`memory_add_text()` and `memory_add_file()` each run inside a SQLite SAVEPOINT transaction. `memory_add_directory()` performs its cleanup pass transactionally and then processes each file in its own transaction. If one file fails, that file rolls back cleanly and previously-committed files remain valid; there are no partially-indexed rows or orphaned chunk/FTS entries for the failed file.
+`memory_add_text()`, `memory_add_file()`, and `memory_add_content()` each run inside a SQLite SAVEPOINT transaction. `memory_add_directory()` performs its cleanup pass transactionally and then processes each file in its own transaction. If one file fails, that file rolls back cleanly and previously-committed files remain valid; there are no partially-indexed rows or orphaned chunk/FTS entries for the failed file.
 
 This makes all sync functions safe to call repeatedly - for example, on a cron schedule or at agent startup - with minimal overhead.
 
@@ -246,11 +248,11 @@ SELECT memory_add_text('Agent A findings...', 'research');
 SELECT cloudsync_network_sync(500, 3);
 SELECT cloudsync_network_sync(500, 3);
 
--- Generate embeddings for any content received from other agents
+-- Refresh hashes and embeddings for any content received or merged from other agents
 SELECT memory_reindex();
 ```
 
-Each piece of text added to the database is parsed into chunks and tracked by a [block-level LWW CRDT algorithm](https://github.com/sqliteai/sqlite-sync?tab=readme-ov-file#block-level-lww), which merges line-level changes from concurrent agents without conflicts. Only the `dbmem_content` table is synced — embeddings are always generated locally after receiving new content.
+Each piece of text added to the database is parsed into chunks and tracked by a [block-level LWW CRDT algorithm](https://github.com/sqliteai/sqlite-sync?tab=readme-ov-file#block-level-lww), which merges line-level changes from concurrent agents without conflicts. Only the portable `dbmem_content` table is synced — embeddings and local filesystem provenance are always local. After a sync merge changes `dbmem_content.value`, `memory_reindex()` recomputes stale content hashes and refreshes local embeddings.
 
 ### Why This Matters for AI Systems
 
@@ -354,7 +356,7 @@ make test DEFINES="-DTEST_SQLITE_EXTENSION"
 
 - **Local Engine**: Built-in llama.cpp for on-device embeddings (requires GGUF model)
 - **Remote Engine**: [vectors.space](https://vectors.space) API for cloud embeddings (requires free API key)
-- **File I/O**: `memory_add_file` and `memory_add_directory` functions
+- **File I/O**: `memory_add_file`, `memory_add_directory`, and `memory_materialize_files` functions
 
 You can also combine options manually:
 

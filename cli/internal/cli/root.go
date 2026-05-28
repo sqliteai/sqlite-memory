@@ -260,7 +260,7 @@ func watchCmd(flags *globalFlags) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "Watching %d sources\n", len(sources))
 			return watchpkg.Run(ctx, sources, debounce, func(ctx context.Context, path string, removed bool) error {
 				if removed {
-					return removeIndexedSource(ctx, db, cfg, flags, path)
+					return removeIndexedSource(ctx, db, cfg, flags, sources, path)
 				}
 				return addSource(ctx, db, cfg, flags, path, "")
 			})
@@ -562,12 +562,32 @@ func addSource(ctx context.Context, db *sql.DB, cfg config.Config, flags *global
 	return memory.AddFile(ctx, db, source, contextLabel)
 }
 
-func removeIndexedSource(ctx context.Context, db *sql.DB, cfg config.Config, flags *globalFlags, source string) error {
+func removeIndexedSource(ctx context.Context, db *sql.DB, cfg config.Config, flags *globalFlags, roots []string, source string) error {
 	path := source
 	if strings.EqualFold(filepath.Ext(source), ".pdf") {
 		path = pdf.IndexPathForSource(config.ResolvePDFCacheDir(cfg, flags.pdfCacheDir), source)
 	}
-	return memory.DeletePath(ctx, db, path)
+	if err := memory.DeletePath(ctx, db, path); err != nil {
+		return err
+	}
+	for _, root := range roots {
+		rel, ok := relativeIndexedPath(root, source)
+		if !ok {
+			continue
+		}
+		if err := memory.DeletePath(ctx, db, rel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func relativeIndexedPath(root, source string) (string, bool) {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(source))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 func installRequiredExtensions(ctx context.Context, cfg config.Config, override string, names []string) error {

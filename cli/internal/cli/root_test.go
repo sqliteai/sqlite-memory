@@ -37,3 +37,23 @@ func TestStatusReturnsOpenError(t *testing.T) {
 		t.Fatal("status returned nil error for missing extensions")
 	}
 }
+
+func TestRelativeIndexedPath(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "docs", "readme.md")
+	got, ok := relativeIndexedPath(root, source)
+	if !ok {
+		t.Fatal("relativeIndexedPath returned false")
+	}
+	if got != "docs/readme.md" {
+		t.Fatalf("relativeIndexedPath() = %q", got)
+	}
+}
+
+func TestRelativeIndexedPathRejectsSibling(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(filepath.Dir(root), "sibling.md")
+	if got, ok := relativeIndexedPath(root, source); ok {
+		t.Fatalf("relativeIndexedPath() = %q, true", got)
+	}
+}

@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/sqliteai/sqlite-memory/cli/internal/config"
 )
@@ -77,6 +77,15 @@ func AddFile(ctx context.Context, db *sql.DB, path, contextLabel string) error {
 	return err
 }
 
+func AddContent(ctx context.Context, db *sql.DB, path, content, contextLabel string) error {
+	if contextLabel == "" {
+		_, err := db.ExecContext(ctx, "SELECT memory_add_content(?, ?)", path, content)
+		return err
+	}
+	_, err := db.ExecContext(ctx, "SELECT memory_add_content(?, ?, ?)", path, content, contextLabel)
+	return err
+}
+
 func AddDirectory(ctx context.Context, db *sql.DB, path, contextLabel string) error {
 	if contextLabel == "" {
 		_, err := db.ExecContext(ctx, "SELECT memory_add_directory(?)", path)
@@ -113,28 +122,37 @@ func Delete(ctx context.Context, db *sql.DB, hash string) error {
 }
 
 func DeletePath(ctx context.Context, db *sql.DB, path string) error {
-	rows, err := db.QueryContext(ctx, "SELECT hash FROM dbmem_content WHERE path = ?", path)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var hashes []string
-	for rows.Next() {
-		var hash string
-		if err := rows.Scan(&hash); err != nil {
+	for _, candidate := range pathCandidates(path) {
+		var deleted int
+		if err := db.QueryRowContext(ctx, "SELECT memory_delete_file(?)", candidate).Scan(&deleted); err != nil {
 			return err
 		}
-		hashes = append(hashes, hash)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, hash := range hashes {
-		if err := Delete(ctx, db, hash); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
+		if deleted > 0 {
+			return nil
 		}
 	}
 	return nil
+}
+
+func pathCandidates(path string) []string {
+	candidates := []string{filepath.ToSlash(filepath.Clean(path))}
+	if filepath.IsAbs(path) {
+		candidates = append(candidates, filepath.ToSlash(filepath.Base(path)))
+	}
+
+	out := candidates[:0]
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		if candidate == "." || candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		out = append(out, candidate)
+	}
+	return out
 }
 
 func DeleteContext(ctx context.Context, db *sql.DB, contextLabel string) error {

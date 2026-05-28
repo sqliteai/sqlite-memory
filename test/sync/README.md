@@ -129,4 +129,4 @@ The test uses `cloudsync_network_sync(500, 3)` called twice per agent in sequenc
 
 Sync is enabled on `dbmem_content`, and the `value` column (which stores the raw text) is configured with the `block` algorithm so that line-level changes from concurrent agents are preserved rather than replaced wholesale.
 
-After receiving content via sync, each agent calls `memory_reindex()` to generate embeddings for the newly arrived rows. Only rows not yet in the local embedding vault are processed, so existing embeddings are never duplicated.
+After receiving content via sync, each agent calls `memory_reindex()` to generate embeddings for newly arrived rows and refresh rows whose `value` was merged by sync. Rows whose hash and vault entries are already aligned are skipped, so existing embeddings are not duplicated.

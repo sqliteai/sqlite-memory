@@ -1,6 +1,8 @@
 package memory
 
 import (
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/sqliteai/sqlite-memory/cli/internal/config"
@@ -23,5 +25,20 @@ func TestResolveModelRemoteWithAPIKey(t *testing.T) {
 	}
 	if got.Model != defaultRemoteModel {
 		t.Fatalf("model = %q", got.Model)
+	}
+}
+
+func TestPathCandidatesAbsolutePathIncludesStoredBasename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "docs", "readme.md")
+	want := []string{filepath.ToSlash(filepath.Clean(path)), "readme.md"}
+	if got := pathCandidates(path); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pathCandidates() = %#v, want %#v", got, want)
+	}
+}
+
+func TestPathCandidatesRelativePathPreservesDirectory(t *testing.T) {
+	want := []string{"docs/readme.md"}
+	if got := pathCandidates(filepath.Join("docs", "readme.md")); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pathCandidates() = %#v, want %#v", got, want)
 	}
 }
