@@ -64,6 +64,7 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_EMBEDDING_CACHE      "embedding_cache"
 #define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES    "cache_max_entries"
 #define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE    "search_oversample"
+#define DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS   "preserve_duplicate_paths"
 #define DBMEM_SETTINGS_KEY_SCHEMA_VERSION       "schema_version"
 
 #define DBMEM_SCHEMA_VERSION                    4
@@ -126,6 +127,7 @@ struct dbmem_context {
     bool        embedding_cache;                // Enable/disable embedding cache (default: true)
     int         cache_max_entries;              // Max cache entries (0 = no limit)
     int         search_oversample;             // Search oversampling multiplier (0 = no oversampling)
+    bool        preserve_duplicate_paths;       // Keep separate rows for distinct paths with identical content
 
     // Cache
     float       *cache_buffer;                  // Reusable buffer for cache hits
@@ -179,6 +181,16 @@ static bool dbmem_value_hash (sqlite3_value *value, uint64_t *hash) {
         default:
             return false;
     }
+}
+
+static uint64_t dbmem_storage_hash_compute (const char *buffer, size_t len, const char *path, bool preserve_duplicate_paths) {
+    uint64_t content_hash = dbmem_hash_compute(buffer, len);
+    if (!preserve_duplicate_paths || !path || !path[0]) return content_hash;
+
+    uint64_t parts[2];
+    parts[0] = content_hash;
+    parts[1] = dbmem_hash_compute(path, strlen(path));
+    return dbmem_hash_compute(parts, sizeof(parts));
 }
 
 // MARK: - Settings -
@@ -323,6 +335,12 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE) == 0) {
         int n = sqlite3_value_int(value);
         if (n >= 0) ctx->search_oversample = n;
+        return 0;
+    }
+
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS) == 0) {
+        int n = sqlite3_value_int(value);
+        ctx->preserve_duplicate_paths = (n > 0) ? 1 : 0;
         return 0;
     }
 
@@ -668,10 +686,10 @@ static bool dbmem_database_check_if_stored (sqlite3 *db, uint64_t hash, int64_t 
     rc = sqlite3_step(vm);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     else if (rc != SQLITE_ROW) goto cleanup;
-
-    // SQLITE_ROW case
-    sqlite3_int64 saved_len = sqlite3_column_int64(vm, 0);
-    result = (saved_len == len);
+    else {
+        sqlite3_int64 saved_len = sqlite3_column_int64(vm, 0);
+        result = (saved_len == len);
+    }
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
@@ -2390,7 +2408,11 @@ static void dbmem_get_option (sqlite3_context *context, int argc, sqlite3_value 
 
     rc = sqlite3_step(vm);
     if (rc == SQLITE_DONE) {
-        sqlite3_result_null(context);
+        if (strcasecmp(key, DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS) == 0) {
+            sqlite3_result_int(context, 0);
+        } else {
+            sqlite3_result_null(context);
+        }
         rc = SQLITE_OK;
     } else if (rc == SQLITE_ROW) {
         sqlite3_result_value(context, sqlite3_column_value(vm, 0));
@@ -2616,7 +2638,7 @@ cleanup:
 }
 
 static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t len) {
-    uint64_t hash = dbmem_hash_compute(buffer, (size_t)len);
+    uint64_t hash = dbmem_storage_hash_compute(buffer, (size_t)len, ctx->path, ctx->preserve_duplicate_paths);
     const char *saved_path = ctx->path;
     char *unique_path = NULL;
     bool transaction_started = false;
@@ -2625,6 +2647,7 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
         unique_path = dbmem_path_unique_storage_copy(ctx->db, ctx->path, ctx->source_path);
         if (!unique_path) return SQLITE_NOMEM;
         ctx->path = unique_path;
+        hash = dbmem_storage_hash_compute(buffer, (size_t)len, ctx->path, ctx->preserve_duplicate_paths);
     }
 
     sqlite3 *db = ctx->db;
@@ -2638,7 +2661,7 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
         }
         dbmem_database_delete_stale_path(db, ctx->path, hash);
 
-        if (dbmem_database_check_if_stored(ctx->db, hash, len)) {
+        if (!ctx->preserve_duplicate_paths && dbmem_database_check_if_stored(ctx->db, hash, len)) {
             if (ctx->source_path) {
                 char *stored_path = dbmem_database_path_for_hash_copy(ctx->db, hash);
                 if (!stored_path) {
@@ -2669,6 +2692,8 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
         rc = dbmem_database_add_entry(ctx, db, hash, buffer, len);
         if (rc != SQLITE_OK) goto cleanup;
     }
+
+    if (len == 0) goto cleanup;
 
     rc = dbmem_parse(buffer, (size_t)len, &settings);
 
@@ -3529,20 +3554,25 @@ static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value
             break;
         }
 
-        uint64_t value_hash = dbmem_hash_compute(value, (size_t)value_len);
-        bool hash_matches = (stored_hash == value_hash);
-        bool value_has_vault = dbmem_database_hash_has_vault(db, value_hash);
-        bool needs_reindex = !hash_matches || !value_has_vault;
+        uint64_t content_hash = dbmem_hash_compute(value, (size_t)value_len);
+        uint64_t scoped_hash = dbmem_storage_hash_compute(value, (size_t)value_len, path, true);
+        bool hash_matches = (stored_hash == content_hash || stored_hash == scoped_hash);
+        uint64_t target_hash = hash_matches
+            ? stored_hash
+            : dbmem_storage_hash_compute(value, (size_t)value_len, path, ctx->preserve_duplicate_paths);
+        bool target_has_vault = (value_len == 0) || dbmem_database_hash_has_vault(db, target_hash);
+        bool needs_hash_update = !hash_matches;
+        bool needs_reindex = (value_len > 0) && (!hash_matches || !target_has_vault);
 
-        if (needs_reindex && !value_has_vault) {
+        if (needs_reindex) {
             ctx->path = path;
             ctx->context = ctx_name;
             rc = dbmem_process_buffer(ctx, value, value_len);
         }
 
-        if (rc == SQLITE_OK && needs_reindex) {
-            rc = dbmem_database_update_content_hash(db, path, value_hash);
-            if (rc == SQLITE_OK && !hash_matches) {
+        if (rc == SQLITE_OK && needs_hash_update) {
+            rc = dbmem_database_update_content_hash(db, path, target_hash);
+            if (rc == SQLITE_OK) {
                 rc = dbmem_database_delete_index_hash(db, stored_hash);
             }
         }
@@ -3566,7 +3596,7 @@ static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value
         dbmemory_free(ctx_name);
 
         if (rc != SQLITE_OK) break;
-        if (needs_reindex) processed++;
+        if (needs_reindex || needs_hash_update) processed++;
     }
 
 done:

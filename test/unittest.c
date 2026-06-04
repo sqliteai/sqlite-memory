@@ -3441,6 +3441,134 @@ TEST(sqlite_memory_add_content_removes_stale_path_when_new_content_is_deduped) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_preserve_duplicate_paths_option_defaults_to_zero) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = -1;
+    int rc = exec_get_int(db, "SELECT memory_get_option('preserve_duplicate_paths');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('preserve_duplicate_paths');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_get_option('preserve_duplicate_paths');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_stores_empty_content) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "docs/empty.md", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, "", 0, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'docs/empty.md' AND length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/a.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/b.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(DISTINCT hash) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_preserves_duplicate_nonempty_paths_when_enabled) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    const char *content = "# API\nSame content.";
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "docs/a.md", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, content, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content(?1, ?2);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "docs/b.md", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, content, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(DISTINCT hash) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_add_file_reads_disk_and_stores_context) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -3494,6 +3622,82 @@ TEST(sqlite_memory_add_file_reads_disk_and_stores_context) {
 
     remove_test_file(path);
     rmdir_p(dir);
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_file_stores_empty_file) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *path = TEST_TMP_DIR "/dbmem_empty_file.md";
+    remove_test_file(path);
+    ASSERT_EQ(create_test_file(path, ""), 0);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    remove_test_file(path);
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_file_preserves_duplicate_empty_paths_when_enabled) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    const char *file1 = TEST_TMP_DIR "/dbmem_empty_file_a.md";
+    const char *file2 = TEST_TMP_DIR "/dbmem_empty_file_b.md";
+    remove_test_file(file1);
+    remove_test_file(file2);
+    ASSERT_EQ(create_test_file(file1, ""), 0);
+    ASSERT_EQ(create_test_file(file2, ""), 0);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, file1, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_file(?1);", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, file2, -1, SQLITE_STATIC);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ROW);
+    sqlite3_finalize(stmt);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(DISTINCT hash) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content_source;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    remove_test_file(file1);
+    remove_test_file(file2);
     sqlite3_close(db);
 }
 
@@ -4464,7 +4668,13 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
     RUN_TEST(sqlite_memory_add_content_uses_explicit_content_and_context);
     RUN_TEST(sqlite_memory_add_content_removes_stale_path_when_new_content_is_deduped);
+    RUN_TEST(sqlite_memory_preserve_duplicate_paths_option_defaults_to_zero);
+    RUN_TEST(sqlite_memory_add_content_stores_empty_content);
+    RUN_TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled);
+    RUN_TEST(sqlite_memory_add_content_preserves_duplicate_nonempty_paths_when_enabled);
     RUN_TEST(sqlite_memory_add_file_reads_disk_and_stores_context);
+    RUN_TEST(sqlite_memory_add_file_stores_empty_file);
+    RUN_TEST(sqlite_memory_add_file_preserves_duplicate_empty_paths_when_enabled);
     RUN_TEST(sqlite_memory_add_file_attaches_source_path_to_existing_logical_path);
 #ifndef _WIN32
     RUN_TEST(sqlite_memory_add_file_disambiguates_parent_collisions);
