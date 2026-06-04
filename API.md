@@ -35,7 +35,7 @@ sqlite-memory enables semantic search over text content stored in SQLite. It:
 
 ## Sync Behavior
 
-All `memory_add_*` functions use **content-hash change detection** to avoid redundant embedding computation. Each piece of content is hashed before processing — if the hash already exists in the database, the content is skipped.
+By default, all `memory_add_*` functions use **content-hash change detection** to avoid redundant embedding computation. Each piece of content is hashed before processing — if the hash already exists in the database, the content is skipped. Set `preserve_duplicate_paths=1` to store distinct logical paths even when their content is identical or empty.
 
 ### Change Detection
 
@@ -197,6 +197,9 @@ SELECT memory_set_option('engine_warmup', 1);
 
 -- Set minimum score threshold
 SELECT memory_set_option('min_score', 0.75);
+
+-- Preserve separate logical paths even when content is identical
+SELECT memory_set_option('preserve_duplicate_paths', 1);
 ```
 
 ---
@@ -210,7 +213,7 @@ Retrieves a configuration option value.
 |-----------|------|-------------|
 | `key` | TEXT | Option name |
 
-**Returns:** ANY - Option value, or NULL if not set
+**Returns:** ANY - Option value, or NULL if not set. `preserve_duplicate_paths` returns `0` by default.
 
 **Example:**
 ```sql
@@ -303,6 +306,7 @@ Indexes caller-provided file content without reading from the filesystem.
 - No row is added to `dbmem_content_source` because content was supplied by the caller rather than read from the local filesystem
 - If the path was previously indexed with different content, the old entry (chunks, embeddings, FTS) is deleted and new content is reindexed
 - If the new content is already indexed under another path, the stale path is removed and the existing content entry is reused
+- Set `preserve_duplicate_paths=1` to preserve separate rows for distinct paths with identical or empty content
 - Available even when compiled with `DBMEM_OMIT_IO`
 
 **Example:**
@@ -828,6 +832,7 @@ sqlite3_memory_register_provider(db, "my-engine", &provider);
 | `embedding_cache` | INTEGER | 1 | Cache embeddings to avoid redundant computation |
 | `cache_max_entries` | INTEGER | 0 | Max cache entries (0 = no limit). When exceeded, oldest entries are evicted |
 | `search_oversample` | INTEGER | 0 | Search oversampling multiplier (0 = no oversampling). When set, retrieves N * multiplier candidates from each index before merging down to N final results |
+| `preserve_duplicate_paths` | INTEGER | 0 | Preserve distinct logical paths for identical or empty content. When enabled, `dbmem_content.hash` is path-scoped and identifies an entry rather than only the raw content |
 
 ---
 

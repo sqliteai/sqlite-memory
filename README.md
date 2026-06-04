@@ -210,7 +210,7 @@ memories = recall("what's the project timeline")
 
 ## Intelligent Sync
 
-All `memory_add_*` functions use content-hash change detection to avoid redundant work:
+By default, all `memory_add_*` functions use content-hash change detection to avoid redundant work:
 
 - **`memory_add_text`**: Computes a hash of the content. If the same content was already indexed, it is skipped entirely. No duplicate embeddings are ever created.
 - **`memory_add_file`**: Reads the file and hashes its content. If the file was previously indexed with different content, the old entry (chunks, embeddings, FTS) is atomically replaced. Unchanged files are skipped. Absolute file paths are stored as portable logical suffixes, while the original local path is retained only in local metadata.
@@ -218,6 +218,14 @@ All `memory_add_*` functions use content-hash change detection to avoid redundan
 - **`memory_add_directory`**: Performs a full two-phase sync:
   1. **Cleanup**: Removes database entries for files that no longer exist on disk
   2. **Scan**: Recursively processes all matching files - adding new ones, replacing modified ones, and skipping unchanged ones. Stored paths are relative to the scanned directory root, with local provenance retained only in local metadata.
+
+For virtual-file or editor workflows that need separate logical paths even when content is identical or empty, enable path-preserving storage:
+
+```sql
+SELECT memory_set_option('preserve_duplicate_paths', 1);
+```
+
+In this mode, `dbmem_content.hash` identifies the stored entry and is scoped by path.
 
 `memory_add_text()`, `memory_add_file()`, and `memory_add_content()` each run inside a SQLite SAVEPOINT transaction. `memory_add_directory()` performs its cleanup pass transactionally and then processes each file in its own transaction. If one file fails, that file rolls back cleanly and previously-committed files remain valid; there are no partially-indexed rows or orphaned chunk/FTS entries for the failed file.
 
@@ -300,6 +308,7 @@ SELECT memory_set_option('search_oversample', 4); -- Fetch 4x candidates before 
 
 -- File processing
 SELECT memory_set_option('extensions', 'md,txt,rst');  -- File types to index
+SELECT memory_set_option('preserve_duplicate_paths', 1); -- Keep duplicate/empty virtual paths
 
 -- Embedding cache (enabled by default)
 SELECT memory_set_option('embedding_cache', 0);        -- Disable cache
