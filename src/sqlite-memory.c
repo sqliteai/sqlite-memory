@@ -1180,7 +1180,7 @@ static void dbmem_delete (sqlite3_context *context, int argc, sqlite3_value **ar
 
     uint64_t hash = 0;
     if (!dbmem_value_hash(argv[0], &hash)) {
-        sqlite3_result_error(context, "The function memory_delete expects one argument of type TEXT (hash)", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_delete expects one argument of type TEXT (hash)", -1);
         return;
     }
     sqlite3 *db = sqlite3_context_db_handle(context);
@@ -1240,7 +1240,7 @@ static void dbmem_delete_context (sqlite3_context *context, int argc, sqlite3_va
     UNUSED_PARAM(argc);
 
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_delete_context expects one argument of type TEXT (context)", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_delete_context expects one argument of type TEXT (context)", -1);
         return;
     }
 
@@ -1332,7 +1332,7 @@ static void dbmem_delete_file (sqlite3_context *context, int argc, sqlite3_value
     UNUSED_PARAM(argc);
 
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT || sqlite3_value_bytes(argv[0]) == 0) {
-        sqlite3_result_error(context, "The function memory_delete_file expects one non-empty TEXT argument (path)", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_delete_file expects one non-empty TEXT argument (path)", -1);
         return;
     }
 
@@ -1450,7 +1450,7 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
 
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT || sqlite3_value_type(argv[1]) != SQLITE_TEXT ||
         sqlite3_value_bytes(argv[0]) == 0 || sqlite3_value_bytes(argv[1]) == 0) {
-        sqlite3_result_error(context, "The function memory_rename_file expects two non-empty TEXT arguments (old_path, new_path)", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_rename_file expects two non-empty TEXT arguments (old_path, new_path)", -1);
         return;
     }
 
@@ -1996,7 +1996,7 @@ static void dbmem_cache_clear (sqlite3_context *context, int argc, sqlite3_value
         rc = sqlite3_exec(db, "DELETE FROM dbmem_cache;", NULL, NULL, NULL);
     } else if (argc == 2) {
         if (sqlite3_value_type(argv[0]) != SQLITE_TEXT || sqlite3_value_type(argv[1]) != SQLITE_TEXT) {
-            sqlite3_result_error(context, "The function memory_cache_clear expects two arguments of type TEXT (provider, model)", SQLITE_ERROR);
+            sqlite3_result_error(context, "The function memory_cache_clear expects two arguments of type TEXT (provider, model)", -1);
             return;
         }
         const char *provider = (const char *)sqlite3_value_text(argv[0]);
@@ -2004,7 +2004,7 @@ static void dbmem_cache_clear (sqlite3_context *context, int argc, sqlite3_value
 
         rc = dbmem_cache_clear_provider_model(db, provider, model);
     } else {
-        sqlite3_result_error(context, "The function memory_cache_clear expects 0 or 2 arguments", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_cache_clear expects 0 or 2 arguments", -1);
         return;
     }
 
@@ -2031,7 +2031,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
 
     // sanity check type
     if ((sqlite3_value_type(argv[0]) != SQLITE_TEXT) || (sqlite3_value_type(argv[1]) != SQLITE_TEXT)) {
-        sqlite3_result_error(context, "The function memory_set_model expects two arguments of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_set_model expects two arguments of type TEXT", -1);
         return;
     }
 
@@ -2058,13 +2058,13 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
     if (!is_custom_provider) {
         #ifdef DBMEM_OMIT_LOCAL_ENGINE
         if (is_local_provider) {
-            sqlite3_result_error(context, "Local provider cannot be set because SQLite-memory was compiled without local provider support", SQLITE_ERROR);
+            sqlite3_result_error(context, "Local provider cannot be set because SQLite-memory was compiled without local provider support", -1);
             return;
         }
         #endif
         #ifdef DBMEM_OMIT_REMOTE_ENGINE
         if (!is_local_provider) {
-            sqlite3_result_error(context, "Remote provider cannot be set because SQLite-memory was compiled without remote provider support", SQLITE_ERROR);
+            sqlite3_result_error(context, "Remote provider cannot be set because SQLite-memory was compiled without remote provider support", -1);
             return;
         }
         #endif
@@ -2116,7 +2116,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
         if (dbmem_file_exists(model) == false) {
             dbmemory_free(new_provider);
             dbmemory_free(new_model);
-            sqlite3_result_error(context, "Local model not found in the specified path", SQLITE_ERROR);
+            sqlite3_result_error(context, "Local model not found in the specified path", -1);
             return;
         }
 
@@ -2247,7 +2247,7 @@ static void dbmem_set_model (sqlite3_context *context, int argc, sqlite3_value *
 static void dbmem_set_apikey (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_set_apikey expects one argument of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_set_apikey expects one argument of type TEXT", -1);
         return;
     }
 
@@ -2320,7 +2320,7 @@ static void dbmem_set_option (sqlite3_context *context, int argc, sqlite3_value 
 
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_set_option expects the key argument to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_set_option expects the key argument to be of type TEXT", -1);
         return;
     }
 
@@ -2374,7 +2374,7 @@ static void dbmem_get_option (sqlite3_context *context, int argc, sqlite3_value 
 
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_get_option expects the key argument to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_get_option expects the key argument to be of type TEXT", -1);
         return;
     }
 
@@ -3011,7 +3011,7 @@ cleanup:
 static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_text expects a parameter of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_text expects a parameter of type TEXT", -1);
         return;
     }
 
@@ -3035,15 +3035,15 @@ static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **
 static void dbmem_add_content (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_content expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_content expects the first parameter to be of type TEXT", -1);
         return;
     }
     if (sqlite3_value_type(argv[1]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_content expects the second parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_content expects the second parameter to be of type TEXT", -1);
         return;
     }
     if (argc == 3 && sqlite3_value_type(argv[2]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_content expects the third parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_content expects the third parameter to be of type TEXT", -1);
         return;
     }
 
@@ -3088,11 +3088,11 @@ static int dbmem_scan_callback (const char *path, void *data) {
 static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_file expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_file expects the first parameter to be of type TEXT", -1);
         return;
     }
     if (argc == 2 && sqlite3_value_type(argv[1]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_file expects the second parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_file expects the second parameter to be of type TEXT", -1);
         return;
     }
 
@@ -3290,7 +3290,7 @@ static char *dbmem_materialize_path_copy (const char *root, const char *path, in
 
 static void dbmem_materialize_files (sqlite3_context *context, int argc, sqlite3_value **argv) {
     if (argc == 1 && sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_materialize_files expects an optional root path of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_materialize_files expects an optional root path of type TEXT", -1);
         return;
     }
 
@@ -3419,7 +3419,7 @@ static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_pa
 static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_value **argv) {
     // sanity check type
     if (sqlite3_value_type(argv[0]) != SQLITE_TEXT) {
-        sqlite3_result_error(context, "The function memory_add_directory expects the first parameter to be of type TEXT", SQLITE_ERROR);
+        sqlite3_result_error(context, "The function memory_add_directory expects the first parameter to be of type TEXT", -1);
         return;
     }
 
@@ -3438,7 +3438,7 @@ static void dbmem_add_directory (sqlite3_context *context, int argc, sqlite3_val
 
     if (!dbmem_dir_exists(path)) {
         snprintf(ctx->error_msg, DBMEM_ERRBUF_SIZE, "Unable to find directory at path %s", path);
-        sqlite3_result_error(context, ctx->error_msg, SQLITE_ERROR);
+        sqlite3_result_error(context, ctx->error_msg, -1);
         return;
     }
 
