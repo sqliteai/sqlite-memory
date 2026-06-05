@@ -136,8 +136,9 @@ Configures the embedding model to use.
 - When `provider` is `"local"`, the extension uses the built-in llama.cpp engine and verifies the model file exists
 - When `provider` is anything other than `"local"`, the extension uses the [vectors.space](https://vectors.space) remote embedding service
 - Remote embedding requires a free API key from [vectors.space](https://vectors.space) (set via `memory_set_apikey`)
-- Settings are persisted in `dbmem_settings` table
-- For local models, the embedding engine is initialized immediately
+- Provider/model settings are persisted in the `dbmem_settings` table and reused by new connections
+- Calling `memory_set_model()` initializes the embedding engine immediately, which can be used to preload and validate the engine
+- When provider/model settings are loaded by a new connection, the engine is initialized lazily on first embedding use
 - **Automatic reindex**: If a model was previously configured and the new provider/model differs, all existing content is automatically re-embedded with the new model. File-based entries are re-read from disk; text-based entries are re-embedded from stored content. Errors on individual entries are silently skipped (best-effort)
 
 **Example:**
@@ -164,7 +165,7 @@ Sets the API key for the [vectors.space](https://vectors.space) remote embedding
 **Returns:** INTEGER - 1 on success
 
 **Notes:**
-- API key is stored in memory only, not persisted to disk
+- API key is stored in memory only, not persisted to disk, and must be set per connection for remote embeddings
 - Required when using any provider other than `"local"`
 - Get a free API key by creating an account at [vectors.space](https://vectors.space)
 
@@ -623,7 +624,7 @@ Generates or refreshes local embeddings for stored content.
 **Returns:** INTEGER - Number of content rows reindexed or realigned
 
 **Notes:**
-- Requires an embedding model configured with `memory_set_model()`
+- Requires an embedding model configured with `memory_set_model()` or loaded from persisted provider/model settings
 - Processes rows in `dbmem_content` that have stored `value`
 - Skips rows whose `dbmem_content.hash` already matches `value` and whose local `dbmem_vault` entries already exist
 - After sync merges remote changes into `dbmem_content.value`, recomputes stale hashes, refreshes missing embeddings, and removes old local index rows
@@ -714,7 +715,7 @@ int sqlite3_memory_register_provider(
 );
 ```
 
-Registers a custom embedding engine for a specific database connection. Once registered, calling `memory_set_model(provider_name, model)` from SQL will use your engine instead of the built-in local or remote engines.
+Registers a custom embedding engine for a specific database connection. Once registered, calling `memory_set_model(provider_name, model)` from SQL will use your engine instead of the built-in local or remote engines. If provider/model settings were already loaded from `dbmem_settings`, the custom engine is initialized lazily on first embedding use after registration.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -728,7 +729,8 @@ Registers a custom embedding engine for a specific database connection. Once reg
 **`dbmem_provider_t` struct:**
 ```c
 typedef struct {
-    // Called when memory_set_model(provider_name, model) is executed.
+    // Called when memory_set_model(provider_name, model) is executed, or lazily
+    // on first embedding use when provider/model were loaded from settings.
     // api_key is the value set via memory_set_apikey() (may be NULL).
     // xdata is the user pointer from this struct.
     // Return an opaque engine pointer on success, or NULL on error (fill err_msg).

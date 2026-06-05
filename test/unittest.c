@@ -1490,6 +1490,19 @@ static sqlite3 *open_test_db(void) {
     return db;
 }
 
+static sqlite3 *open_test_db_path(const char *path) {
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(path, &db);
+    if (rc != SQLITE_OK) return NULL;
+
+    rc = sqlite3_memory_init(db, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
 // Helper to execute SQL and get integer result
 static int exec_get_int(sqlite3 *db, const char *sql, sqlite3_int64 *result) {
     sqlite3_stmt *stmt = NULL;
@@ -3275,10 +3288,12 @@ typedef struct {
 } dummy_engine_t;
 
 static int dummy_compute_calls = 0;
+static int dummy_init_calls = 0;
 
 static void *dummy_init(const char *model, const char *api_key, void *xdata, char err_msg[1024]) {
     UNUSED_PARAM(model);
     UNUSED_PARAM(xdata);
+    dummy_init_calls++;
     dummy_engine_t *e = (dummy_engine_t *)calloc(1, sizeof(dummy_engine_t));
     if (!e) { snprintf(err_msg, 1024, "alloc failed"); return NULL; }
     e->dimension = 4;
@@ -4069,6 +4084,128 @@ TEST(sqlite_memory_add_text_requires_model) {
     sqlite3_close(db);
 }
 
+#ifndef DBMEM_OMIT_REMOTE_ENGINE
+TEST(sqlite_saved_remote_model_initializes_lazily_after_apikey) {
+    const char *path = TEST_TMP_DIR "/dbmem_saved_remote_model.sqlite";
+    remove_test_file(path);
+
+    sqlite3 *db = open_test_db_path(path);
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT OR REPLACE INTO dbmem_settings (key, value) VALUES ('provider', 'openai');"
+        "INSERT OR REPLACE INTO dbmem_settings (key, value) VALUES ('model', 'text-embedding-3-small');",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_close(db);
+
+    db = open_test_db_path(path);
+    ASSERT(db != NULL);
+
+    dbmem_context *ctx = get_test_ctx(db);
+    ASSERT(ctx != NULL);
+    rc = dbmem_context_ensure_engine(ctx);
+    ASSERT_EQ(rc, SQLITE_ERROR);
+    ASSERT(strstr(dbmem_context_errmsg(ctx), "memory_set_apikey must be called") != NULL);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_apikey('test-key');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = dbmem_context_ensure_engine(ctx);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    bool is_local = true;
+    ASSERT(dbmem_context_engine(ctx, &is_local) != NULL);
+    ASSERT_EQ(is_local, false);
+
+    sqlite3_close(db);
+    remove_test_file(path);
+}
+#endif
+
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+TEST(sqlite_saved_local_model_initializes_lazily) {
+    const char *path = TEST_TMP_DIR "/dbmem_saved_local_model.sqlite";
+    const char *model_path = "models/embeddinggemma-300M-Q8_0.gguf";
+    remove_test_file(path);
+
+    if (access(model_path, F_OK) != 0) return;
+
+    sqlite3 *db = open_test_db_path(path);
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_model('local', 'models/embeddinggemma-300M-Q8_0.gguf');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_close(db);
+
+    db = open_test_db_path(path);
+    ASSERT(db != NULL);
+
+    dbmem_context *ctx = get_test_ctx(db);
+    ASSERT(ctx != NULL);
+
+    bool is_local = false;
+    ASSERT(dbmem_context_engine(ctx, &is_local) == NULL);
+
+    rc = exec_get_int(db, "SELECT memory_add_text('Saved local model settings should load lazily.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+
+    ASSERT(dbmem_context_engine(ctx, &is_local) != NULL);
+    ASSERT_EQ(is_local, true);
+
+    sqlite3_close(db);
+    remove_test_file(path);
+}
+#endif
+
+TEST(sqlite_saved_custom_model_initializes_lazily_after_register) {
+    const char *path = TEST_TMP_DIR "/dbmem_saved_custom_model.sqlite";
+    remove_test_file(path);
+
+    sqlite3 *db = open_test_db_path(path);
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    sqlite3_close(db);
+
+    dummy_init_calls = 0;
+    dummy_compute_calls = 0;
+
+    db = open_test_db_path(path);
+    ASSERT(db != NULL);
+
+    dbmem_context *ctx = get_test_ctx(db);
+    ASSERT(ctx != NULL);
+    bool is_local = true;
+    ASSERT(dbmem_context_engine(ctx, &is_local) == NULL);
+    ASSERT_EQ(dummy_init_calls, 0);
+
+    rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(dummy_init_calls, 0);
+
+    rc = exec_get_int(db, "SELECT memory_add_text('Saved custom provider settings should load lazily.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result >= 1);
+    ASSERT_EQ(dummy_init_calls, 1);
+    ASSERT(dummy_compute_calls >= 1);
+
+    ASSERT(dbmem_context_engine(ctx, &is_local) != NULL);
+    ASSERT_EQ(is_local, false);
+
+    sqlite3_close(db);
+    remove_test_file(path);
+}
+
 TEST(sqlite_custom_provider_add_text) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -4662,6 +4799,13 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_register);
     RUN_TEST(sqlite_custom_provider_set_model);
     RUN_TEST(sqlite_memory_add_text_requires_model);
+#ifndef DBMEM_OMIT_REMOTE_ENGINE
+    RUN_TEST(sqlite_saved_remote_model_initializes_lazily_after_apikey);
+#endif
+#ifndef DBMEM_OMIT_LOCAL_ENGINE
+    RUN_TEST(sqlite_saved_local_model_initializes_lazily);
+#endif
+    RUN_TEST(sqlite_saved_custom_model_initializes_lazily_after_register);
     RUN_TEST(sqlite_custom_provider_add_text);
     RUN_TEST(sqlite_memory_reindex_refreshes_synced_value_changes);
     RUN_TEST(sqlite_custom_provider_skips_whitespace_only_text);

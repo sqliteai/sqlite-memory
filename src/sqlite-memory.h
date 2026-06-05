@@ -45,7 +45,8 @@ typedef struct {
 } dbmem_embedding_result_t;
 
 typedef struct {
-    // Called when memory_set_model(provider, model) matches this provider.
+    // Called when memory_set_model(provider, model) matches this provider, or
+    // lazily on first embedding use when provider/model were loaded from settings.
     // api_key is the value set via memory_set_apikey() (may be NULL).
     // xdata is the user-supplied generic pointer from the struct.
     // Return opaque engine pointer, or NULL on error (fill err_msg).
@@ -67,6 +68,7 @@ typedef struct {
 SQLITE_DBMEMORY_API int sqlite3_memory_register_provider (sqlite3 *db, const char *provider_name, const dbmem_provider_t *provider);
 
 void  *dbmem_context_engine (dbmem_context *ctx, bool *is_local);
+int     dbmem_context_ensure_engine (dbmem_context *ctx);
 bool   dbmem_context_is_custom (dbmem_context *ctx);
 bool   dbmem_context_load_vector (dbmem_context *ctx);
 bool   dbmem_context_sync_available (dbmem_context *ctx);
