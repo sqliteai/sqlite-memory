@@ -4649,6 +4649,46 @@ TEST(sqlite_memory_reindex_preserves_directory_markers) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_reindex_preserves_empty_files) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/empty.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char hash_before[DBMEM_HASH_STR_MAXLEN];
+    rc = exec_get_text(db, "SELECT hash FROM dbmem_content WHERE path = 'docs/empty.md';", hash_before, sizeof(hash_before));
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_reindex();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'docs/empty.md' AND value = '' AND length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char hash_after[DBMEM_HASH_STR_MAXLEN];
+    rc = exec_get_text(db, "SELECT hash FROM dbmem_content WHERE path = 'docs/empty.md';", hash_after, sizeof(hash_after));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(hash_after, hash_before);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_set_model_reindex_preserves_directory_markers) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -5168,6 +5208,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_add_text);
     RUN_TEST(sqlite_memory_reindex_refreshes_synced_value_changes);
     RUN_TEST(sqlite_memory_reindex_preserves_directory_markers);
+    RUN_TEST(sqlite_memory_reindex_preserves_empty_files);
     RUN_TEST(sqlite_set_model_reindex_preserves_directory_markers);
     RUN_TEST(sqlite_custom_provider_skips_whitespace_only_text);
     RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
