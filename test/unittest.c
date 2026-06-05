@@ -1785,6 +1785,33 @@ TEST(sqlite_memory_delete_file_invalid_path) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_delete_file_removes_directory_marker_only) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 805), 'dirname/', '', 0, NULL, 0), "
+        "(printf('%016x', 806), 'dirname/file.md', 'content', 7, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_delete_file('dirname');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dirname/';", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dirname/file.md';", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_rename_file_direct) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -1815,6 +1842,56 @@ TEST(sqlite_memory_rename_file_direct) {
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE hash = printf('%016x', 780);", &count);
     ASSERT_EQ(rc, SQLITE_OK);
     ASSERT_EQ(count, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_directory_marker) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 783), 'old-dir/', '', 0, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_rename_file('old-dir/', 'new-dir/');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char path[64];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content WHERE hash = printf('%016x', 783);", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path, "new-dir/");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_rejects_marker_file_conversion) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 784), 'dir/', '', 0, NULL, 0), "
+        "(printf('%016x', 785), 'file.md', 'content', 7, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_rename_file('dir/', 'fileish');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_rename_file('file.md', 'dirish/');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
 
     sqlite3_close(db);
 }
@@ -2068,6 +2145,43 @@ TEST(sqlite_memory_list_files_escapes_json_strings) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_list_files_includes_empty_directory_marker) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 771), 'dirname/', '', 0, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[512];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"dirname\",\"path\":\"dirname\",\"children\":[]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_merges_directory_marker_with_children) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 772), 'dirname/', '', 0, NULL, 0), "
+        "(printf('%016x', 773), 'dirname/file.md', 'content', 7, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[512];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"dirname\",\"path\":\"dirname\",\"children\":[{\"type\":\"file\",\"name\":\"file.md\",\"path\":\"dirname/file.md\"}]}]}");
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_materialize_files_creates_directories_and_files) {
     const char *base = TEST_TMP_DIR "/dbmem_materialize";
     const char *docs = TEST_TMP_DIR "/dbmem_materialize/docs";
@@ -2114,6 +2228,35 @@ TEST(sqlite_memory_materialize_files_creates_directories_and_files) {
     remove_test_file(file2);
     rmdir_p(nested);
     rmdir_p(docs);
+    rmdir_p(base);
+}
+
+TEST(sqlite_memory_materialize_files_creates_directory_markers) {
+    const char *base = TEST_TMP_DIR "/dbmem_materialize_marker";
+    const char *dirname = TEST_TMP_DIR "/dbmem_materialize_marker/dirname";
+
+    rmdir_p(dirname);
+    rmdir_p(base);
+
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) "
+        "VALUES (printf('%016x', 815), 'dirname/', '', 0, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    char sql[1024];
+    snprintf(sql, sizeof(sql), "SELECT memory_materialize_files('%s');", base);
+    rc = exec_get_int(db, sql, &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+    ASSERT(dbmem_dir_exists(dirname));
+
+    sqlite3_close(db);
+    rmdir_p(dirname);
     rmdir_p(base);
 }
 
@@ -3561,6 +3704,131 @@ TEST(sqlite_memory_add_content_keeps_same_empty_path_idempotent_when_preserving_
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_add_content_requires_preserve_for_directory_marker) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT memory_add_content('dirname/', '');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    const char *msg = sqlite3_errmsg(db);
+    ASSERT(strstr(msg, "preserve_duplicate_paths=1") != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_creates_directory_marker) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname/', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char path[64];
+    rc = exec_get_text(db, "SELECT path FROM dbmem_content;", path, sizeof(path));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(path, "dirname/");
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dirname/' AND value = '' AND length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    char json[512];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"dirname\",\"path\":\"dirname\",\"children\":[]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_directory_marker_is_idempotent) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname/', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname/', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dirname/';", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_rejects_nonempty_directory_marker) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content('dirname/', 'content');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_add_content_rejects_file_directory_conflicts) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content('dirname/', '');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    rc = exec_get_int(db, "SELECT memory_clear();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname/', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content('dirname', '');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_add_content_preserves_duplicate_nonempty_paths_when_enabled) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -4350,6 +4618,67 @@ TEST(sqlite_memory_reindex_refreshes_synced_value_changes) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_reindex_preserves_directory_markers) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname/', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_reindex();", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dirname/' AND length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_set_model_reindex_preserves_directory_markers) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'model-a');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('dirname/', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'model-b');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'dirname/' AND length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_custom_provider_skips_whitespace_only_text) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -4762,7 +5091,10 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_delete_file_matches_source_path);
     RUN_TEST(sqlite_memory_delete_file_rejects_ambiguous_path);
     RUN_TEST(sqlite_memory_delete_file_invalid_path);
+    RUN_TEST(sqlite_memory_delete_file_removes_directory_marker_only);
     RUN_TEST(sqlite_memory_rename_file_direct);
+    RUN_TEST(sqlite_memory_rename_file_directory_marker);
+    RUN_TEST(sqlite_memory_rename_file_rejects_marker_file_conversion);
     RUN_TEST(sqlite_memory_rename_file_matches_source_path);
     RUN_TEST(sqlite_memory_rename_file_missing);
     RUN_TEST(sqlite_memory_rename_file_duplicate_path);
@@ -4775,7 +5107,10 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_list_files_does_not_strip_mixed_path_types);
     RUN_TEST(sqlite_memory_list_files_omits_empty_paths);
     RUN_TEST(sqlite_memory_list_files_escapes_json_strings);
+    RUN_TEST(sqlite_memory_list_files_includes_empty_directory_marker);
+    RUN_TEST(sqlite_memory_list_files_merges_directory_marker_with_children);
     RUN_TEST(sqlite_memory_materialize_files_creates_directories_and_files);
+    RUN_TEST(sqlite_memory_materialize_files_creates_directory_markers);
     RUN_TEST(sqlite_memory_materialize_files_accepts_existing_same_content);
     RUN_TEST(sqlite_memory_materialize_files_rejects_parent_segments);
     RUN_TEST(sqlite_memory_materialize_files_rejects_null_content);
@@ -4832,6 +5167,8 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_saved_custom_model_initializes_lazily_after_register);
     RUN_TEST(sqlite_custom_provider_add_text);
     RUN_TEST(sqlite_memory_reindex_refreshes_synced_value_changes);
+    RUN_TEST(sqlite_memory_reindex_preserves_directory_markers);
+    RUN_TEST(sqlite_set_model_reindex_preserves_directory_markers);
     RUN_TEST(sqlite_custom_provider_skips_whitespace_only_text);
     RUN_TEST(sqlite_custom_provider_persists_truncated_metadata);
     RUN_TEST(sqlite_memory_add_content_uses_explicit_content_and_context);
@@ -4840,6 +5177,11 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_add_content_stores_empty_content);
     RUN_TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled);
     RUN_TEST(sqlite_memory_add_content_keeps_same_empty_path_idempotent_when_preserving_duplicates);
+    RUN_TEST(sqlite_memory_add_content_requires_preserve_for_directory_marker);
+    RUN_TEST(sqlite_memory_add_content_creates_directory_marker);
+    RUN_TEST(sqlite_memory_add_content_directory_marker_is_idempotent);
+    RUN_TEST(sqlite_memory_add_content_rejects_nonempty_directory_marker);
+    RUN_TEST(sqlite_memory_add_content_rejects_file_directory_conflicts);
     RUN_TEST(sqlite_memory_add_content_preserves_duplicate_nonempty_paths_when_enabled);
     RUN_TEST(sqlite_memory_add_file_reads_disk_and_stores_context);
     RUN_TEST(sqlite_memory_add_file_stores_empty_file);

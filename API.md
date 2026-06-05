@@ -308,11 +308,16 @@ Indexes caller-provided file content without reading from the filesystem.
 - If the path was previously indexed with different content, the old entry (chunks, embeddings, FTS) is deleted and new content is reindexed
 - If the new content is already indexed under another path, the stale path is removed and the existing content entry is reused
 - Set `preserve_duplicate_paths=1` to preserve separate rows for distinct paths with identical or empty content
+- With `preserve_duplicate_paths=1`, an empty `content` value and a trailing slash in `path` creates an explicit empty directory marker, for example `memory_add_content('dirname/', '')`
+- Directory markers are stored in `dbmem_content` with a trailing slash path, are shown as directories by `memory_list_files()`, and are not indexed for search
+- Directory marker paths cannot contain non-empty content and cannot conflict with a file path of the same name
 - Available even when compiled with `DBMEM_OMIT_IO`
 
 **Example:**
 ```sql
 SELECT memory_add_content('docs/api.md', '# API\nContent already loaded by the caller.', 'documentation');
+SELECT memory_set_option('preserve_duplicate_paths', 1);
+SELECT memory_add_content('docs/drafts/', '');
 ```
 
 ---
@@ -334,6 +339,7 @@ Renames an indexed file path in memory without reprocessing content.
 - It does not rename the file on disk or change the stored `source_path` value
 - Does not change `hash`, `value`, embeddings, or FTS entries
 - Fails if `new_path` already exists because `dbmem_content.path` is unique
+- Explicit directory markers can be renamed only to another trailing-slash marker path; this renames only the marker row, not child paths
 - Fails if `old_path` matches more than one row across `path` and local `dbmem_content_source.source_path`; pass a unique logical path or exact local source path
 
 **Example:**
@@ -392,10 +398,11 @@ Writes all stored file contents from `dbmem_content` back to the filesystem.
 |-----------|------|----------|-------------|
 | `root_path` | TEXT | No | Filesystem root used to materialize relative paths |
 
-**Returns:** INTEGER - Number of files processed
+**Returns:** INTEGER - Number of files or explicit directory markers processed
 
 **Notes:**
 - Creates parent directories as needed
+- Explicit directory markers created with `memory_add_content('dirname/', '')` are materialized as directories
 - Relative paths are written under `root_path` when provided
 - Paths containing `..` segments are rejected to prevent writing outside the materialization root
 - If a file already exists with the same content, it is left unchanged and no error is returned
@@ -421,7 +428,7 @@ Returns a JSON tree with the indexed directories and files stored in `dbmem_cont
 **Notes:**
 - Rows added with `memory_add_text()` use generated paths and can appear as root-level file nodes
 - Legacy absolute paths are displayed with their common directory prefix removed when possible
-- Directory nodes are derived from indexed file paths
+- Directory nodes are derived from indexed file paths and explicit directory markers
 - Path separators are normalized to `/` in the returned JSON
 - Sibling nodes are sorted with directories first, then files; each group is alphabetical
 
@@ -488,7 +495,7 @@ SELECT memory_delete_context('meetings');
 
 #### `memory_delete_file(path TEXT)`
 
-Deletes an indexed file by its stored path.
+Deletes an indexed file or explicit directory marker by its stored path.
 
 **Parameters:**
 | Parameter | Type | Description |
@@ -500,6 +507,8 @@ Deletes an indexed file by its stored path.
 **Notes:**
 - Atomically deletes the matching `dbmem_content` entry and its rows in `dbmem_vault` and `dbmem_vault_fts`
 - Does not delete or modify the file on disk
+- When the path names an explicit directory marker, deletes only that marker row; files under the directory are not deleted
+- Directory markers can be matched with either `dirname` or `dirname/`
 - Path matching is exact; if a row has local source metadata, `dbmem_content_source.source_path` is also accepted
 - Fails if the argument matches more than one row across `path` and local `dbmem_content_source.source_path`
 

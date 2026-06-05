@@ -232,6 +232,15 @@ SELECT memory_set_option('preserve_duplicate_paths', 1);
 
 In this mode, `dbmem_content.hash` identifies the stored entry and is scoped by path.
 
+The same mode supports explicit empty directory markers for virtual filesystems:
+
+```sql
+SELECT memory_set_option('preserve_duplicate_paths', 1);
+SELECT memory_add_content('dirname/', '');
+```
+
+Directory markers are listed as directories, materialized as directories by `memory_materialize_files()`, and ignored by `memory_search`.
+
 `memory_add_text()`, `memory_add_file()`, and `memory_add_content()` each run inside a SQLite SAVEPOINT transaction. `memory_add_directory()` performs its cleanup pass transactionally and then processes each file in its own transaction. If one file fails, that file rolls back cleanly and previously-committed files remain valid; there are no partially-indexed rows or orphaned chunk/FTS entries for the failed file.
 
 This makes all sync functions safe to call repeatedly - for example, on a cron schedule or at agent startup - with minimal overhead.
