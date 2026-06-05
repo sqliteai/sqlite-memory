@@ -2713,7 +2713,7 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
         }
         dbmem_database_delete_stale_path(db, ctx->path, hash);
 
-        if (!ctx->preserve_duplicate_paths && dbmem_database_check_if_stored(ctx->db, hash, len)) {
+        if (dbmem_database_check_if_stored(ctx->db, hash, len)) {
             if (ctx->source_path) {
                 char *stored_path = dbmem_database_path_for_hash_copy(ctx->db, hash);
                 if (!stored_path) {

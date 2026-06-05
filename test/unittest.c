@@ -3537,6 +3537,30 @@ TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_add_content_keeps_same_empty_path_idempotent_when_preserving_duplicates) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/empty-idempotent.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/empty-idempotent.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'docs/empty-idempotent.md' AND length = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_add_content_preserves_duplicate_nonempty_paths_when_enabled) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -4815,6 +4839,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_preserve_duplicate_paths_option_defaults_to_zero);
     RUN_TEST(sqlite_memory_add_content_stores_empty_content);
     RUN_TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled);
+    RUN_TEST(sqlite_memory_add_content_keeps_same_empty_path_idempotent_when_preserving_duplicates);
     RUN_TEST(sqlite_memory_add_content_preserves_duplicate_nonempty_paths_when_enabled);
     RUN_TEST(sqlite_memory_add_file_reads_disk_and_stores_context);
     RUN_TEST(sqlite_memory_add_file_stores_empty_file);
