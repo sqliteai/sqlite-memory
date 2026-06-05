@@ -656,6 +656,12 @@ static int vMemorySearchCursorFilter (sqlite3_vtab_cursor *cur, int idxNum, cons
     if (rc != SQLITE_OK) return SQLITE_NOMEM;
 
     // perform semantic search
+    rc = dbmem_context_ensure_engine(ctx);
+    if (rc != SQLITE_OK) {
+        sqlvTab->zErrMsg = sqlite3_mprintf("%s", dbmem_context_errmsg(ctx));
+        return SQLITE_ERROR;
+    }
+
     // retrieve engine
     bool is_local;
     void *engine = dbmem_context_engine(ctx, &is_local);

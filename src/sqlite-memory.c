@@ -1067,6 +1067,56 @@ void *dbmem_context_engine (dbmem_context *ctx, bool *is_local) {
     return (ctx->is_local) ? (void *)ctx->l_engine : (void *)ctx->r_engine;
 }
 
+int dbmem_context_ensure_engine (dbmem_context *ctx) {
+    if (!ctx || !ctx->provider || !ctx->model) {
+        if (ctx) dbmem_context_set_error(ctx, "memory_set_model must be called before adding content");
+        return SQLITE_ERROR;
+    }
+
+    bool is_local_provider = (strcasecmp(ctx->provider, DBMEM_LOCAL_PROVIDER) == 0);
+    bool is_custom_provider = (ctx->custom_provider_name && ctx->custom_provider.compute &&
+                               strcasecmp(ctx->provider, ctx->custom_provider_name) == 0);
+
+    ctx->is_local = is_custom_provider ? false : is_local_provider;
+    ctx->is_custom = is_custom_provider;
+
+    if (is_custom_provider) {
+        if (ctx->custom_engine) return SQLITE_OK;
+        ctx->custom_engine = ctx->custom_provider.init(ctx->model, ctx->api_key, ctx->custom_provider.xdata, ctx->error_msg);
+        return ctx->custom_engine ? SQLITE_OK : SQLITE_ERROR;
+    }
+
+    #ifndef DBMEM_OMIT_LOCAL_ENGINE
+    if (is_local_provider) {
+        if (ctx->l_engine) return SQLITE_OK;
+        if (dbmem_file_exists(ctx->model) == false) {
+            dbmem_context_set_error(ctx, "Local model not found in the specified path");
+            return SQLITE_ERROR;
+        }
+
+        int max_context_tokens = (int)(ctx->max_tokens + ctx->overlay_tokens);
+        ctx->l_engine = dbmem_local_engine_init(ctx, ctx->model, max_context_tokens, ctx->error_msg);
+        if (!ctx->l_engine) return SQLITE_ERROR;
+        if (ctx->engine_warmup) dbmem_local_engine_warmup(ctx->l_engine);
+        return SQLITE_OK;
+    }
+    #else
+    if (is_local_provider) {
+        dbmem_context_set_error(ctx, "Local provider cannot be set because SQLite-memory was compiled without local provider support");
+        return SQLITE_ERROR;
+    }
+    #endif
+
+    #ifndef DBMEM_OMIT_REMOTE_ENGINE
+    if (ctx->r_engine) return SQLITE_OK;
+    ctx->r_engine = dbmem_remote_engine_init(ctx, ctx->provider, ctx->model, ctx->error_msg);
+    return ctx->r_engine ? SQLITE_OK : SQLITE_ERROR;
+    #else
+    dbmem_context_set_error(ctx, "Remote provider cannot be set because SQLite-memory was compiled without remote provider support");
+    return SQLITE_ERROR;
+    #endif
+}
+
 bool dbmem_context_is_custom (dbmem_context *ctx) {
     return ctx->is_custom;
 }
@@ -2565,6 +2615,8 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
             dbmem_context_set_error(ctx, "memory_set_model must be called before adding content");
             return SQLITE_ERROR;
         }
+        rc = dbmem_context_ensure_engine(ctx);
+        if (rc != SQLITE_OK) return rc;
 
         // compute embedding
         if (ctx->is_custom) {

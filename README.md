@@ -128,6 +128,10 @@ SELECT memory_set_model('local', '/path/to/nomic-embed-text-v1.5.Q8_0.gguf');
 -- SELECT memory_set_apikey('your-vectorspace-api-key');
 -- SELECT memory_set_model('openai', 'text-embedding-3-small');
 
+-- Provider/model settings are persisted. New connections reuse them and
+-- initialize the engine lazily on first embedding use. Remote API keys are
+-- connection-scoped, so call memory_set_apikey() on each remote connection.
+
 -- Add some knowledge
 SELECT memory_add_text('SQLite is a C-language library that implements a small, fast,
 self-contained, high-reliability, full-featured, SQL database engine. SQLite is the
@@ -182,7 +186,8 @@ conn.enable_load_extension(True)
 conn.load_extension('./vector')
 conn.load_extension('./memory')
 
-# One-time setup
+# One-time setup. Later connections reuse the saved provider/model and lazily
+# load the engine on first embedding use.
 conn.execute("SELECT memory_set_model('local', './models/nomic-embed-text-v1.5.Q8_0.gguf')")
 
 # Store conversation context
