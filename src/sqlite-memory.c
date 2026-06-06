@@ -154,6 +154,11 @@ static int dbmem_database_rollback_transaction (sqlite3 *db);
 static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset);
 static char *dbmem_path_normalized_copy (const char *path);
 static char *dbmem_path_unique_storage_copy (sqlite3 *db, const char *preferred_path, const char *source_path);
+static char *dbmem_path_directory_marker_storage_copy (const char *path);
+static char *dbmem_path_directory_file_storage_copy (const char *path);
+static bool dbmem_path_is_directory_marker (const char *path);
+static bool dbmem_path_has_trailing_separator (const char *path);
+static int dbmem_database_add_directory_marker (dbmem_context *ctx, const char *path, const char *buffer, int64_t len);
 static int dbmem_reindex (dbmem_context *ctx);
 
 static bool fts5_is_available = true;
@@ -796,6 +801,26 @@ cleanup:
     return rc;
 }
 
+static int dbmem_database_path_exists (sqlite3 *db, const char *path, bool *exists) {
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT 1 FROM dbmem_content WHERE path=?1 LIMIT 1;", -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_bind_text(vm, 1, path, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_ROW) {
+        *exists = true;
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_DONE) {
+        *exists = false;
+        rc = SQLITE_OK;
+    }
+
+cleanup:
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
 static void dbmem_database_delete_stale_path (sqlite3 *db, const char *path, uint64_t new_hash) {
     if (!path) return;
 
@@ -917,6 +942,36 @@ static int dbmem_database_add_entry (dbmem_context *ctx, sqlite3 *db, uint64_t h
 cleanup:
     if (rc != SQLITE_OK) DEBUG_DBMEM_ALWAYS("Error in dbmem_database_add_entry: %s", sqlite3_errmsg(ctx->db));
     if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_database_add_directory_marker (dbmem_context *ctx, const char *path, const char *buffer, int64_t len) {
+    sqlite3 *db = ctx->db;
+    bool exists = false;
+    int rc = dbmem_database_path_exists(db, path, &exists);
+    if (rc != SQLITE_OK) return rc;
+    if (exists) return SQLITE_OK;
+
+    uint64_t hash = dbmem_storage_hash_compute(buffer, (size_t)len, path, true);
+    const char *saved_path = ctx->path;
+    bool saved_save_content = ctx->save_content;
+    bool transaction_started = false;
+
+    ctx->path = path;
+    ctx->save_content = true;
+    rc = dbmem_database_begin_transaction(db);
+    if (rc != SQLITE_OK) goto cleanup;
+    transaction_started = true;
+
+    rc = dbmem_database_add_entry(ctx, db, hash, buffer, len);
+
+cleanup:
+    if (transaction_started) {
+        int tx_rc = (rc == SQLITE_OK) ? dbmem_database_commit_transaction(db) : dbmem_database_rollback_transaction(db);
+        if (rc == SQLITE_OK) rc = tx_rc;
+    }
+    ctx->path = saved_path;
+    ctx->save_content = saved_save_content;
     return rc;
 }
 
@@ -1370,18 +1425,22 @@ static int dbmem_resolve_content_hash_for_path (sqlite3 *db, const char *path, u
     static const char *sql =
         "SELECT c.hash FROM dbmem_content c "
         "LEFT JOIN dbmem_content_source s ON s.path = c.path "
-        "WHERE c.path = ?1 OR s.source_path = ?1;";
+        "WHERE c.path = ?1 OR c.path = ?2 OR s.source_path = ?3;";
 
     *matches = 0;
     sqlite3_stmt *vm = NULL;
+    char *marker_path = dbmem_path_directory_marker_storage_copy(path);
+    if (!marker_path) return SQLITE_NOMEM;
+
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
-    if (rc != SQLITE_OK) return rc;
+    if (rc != SQLITE_OK) goto cleanup;
 
     rc = sqlite3_bind_text(vm, 1, path, -1, SQLITE_STATIC);
-    if (rc != SQLITE_OK) {
-        sqlite3_finalize(vm);
-        return rc;
-    }
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_bind_text(vm, 2, marker_path, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
+    rc = sqlite3_bind_text(vm, 3, path, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK) goto cleanup;
 
     while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
         (*matches)++;
@@ -1392,7 +1451,9 @@ static int dbmem_resolve_content_hash_for_path (sqlite3 *db, const char *path, u
     }
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
 
+cleanup:
     sqlite3_finalize(vm);
+    dbmemory_free(marker_path);
     return rc;
 }
 
@@ -1527,6 +1588,8 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
     const char *new_path = (const char *)sqlite3_value_text(argv[1]);
     uint64_t hash = 0;
     int matches = 0;
+    char *resolved_path = NULL;
+    char *new_storage_path = NULL;
 
     int rc = dbmem_resolve_content_hash_for_path(db, old_path, &hash, &matches);
     if (rc != SQLITE_OK) {
@@ -1542,6 +1605,56 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
         return;
     }
 
+    resolved_path = dbmem_database_path_for_hash_copy(db, hash);
+    if (!resolved_path) {
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    bool old_is_directory_marker = dbmem_path_is_directory_marker(resolved_path);
+    bool new_is_directory_marker = dbmem_path_has_trailing_separator(new_path);
+    if (old_is_directory_marker != new_is_directory_marker) {
+        sqlite3_result_error(context, old_is_directory_marker
+            ? "memory_rename_file requires a trailing slash when renaming a directory marker"
+            : "memory_rename_file cannot rename a file to a directory marker path", -1);
+        dbmemory_free(resolved_path);
+        return;
+    }
+
+    new_storage_path = old_is_directory_marker
+        ? dbmem_path_directory_marker_storage_copy(new_path)
+        : dbmem_strdup(new_path);
+    if (!new_storage_path) {
+        dbmemory_free(resolved_path);
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    char *conflict_path = old_is_directory_marker
+        ? dbmem_path_directory_file_storage_copy(new_path)
+        : dbmem_path_directory_marker_storage_copy(new_path);
+    if (!conflict_path) {
+        dbmemory_free(resolved_path);
+        dbmemory_free(new_storage_path);
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+    bool conflict = false;
+    rc = dbmem_database_path_exists(db, conflict_path, &conflict);
+    dbmemory_free(conflict_path);
+    if (rc != SQLITE_OK) {
+        dbmemory_free(resolved_path);
+        dbmemory_free(new_storage_path);
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+    if (conflict) {
+        dbmemory_free(resolved_path);
+        dbmemory_free(new_storage_path);
+        sqlite3_result_error(context, "memory_rename_file path conflicts with an existing file or directory marker", -1);
+        return;
+    }
+
     sqlite3_stmt *vm = NULL;
     rc = dbmem_database_begin_transaction(db);
     if (rc != SQLITE_OK) goto cleanup;
@@ -1550,7 +1663,7 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
     if (rc != SQLITE_OK) goto rollback;
     rc = dbmem_bind_hash(vm, 1, hash);
     if (rc != SQLITE_OK) goto rollback;
-    rc = sqlite3_bind_text(vm, 2, new_path, -1, SQLITE_STATIC);
+    rc = sqlite3_bind_text(vm, 2, new_storage_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto rollback;
 
     rc = sqlite3_step(vm);
@@ -1564,7 +1677,7 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
     if (rc != SQLITE_OK) goto rollback;
     rc = sqlite3_bind_text(vm, 1, old_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto rollback;
-    rc = sqlite3_bind_text(vm, 2, new_path, -1, SQLITE_STATIC);
+    rc = sqlite3_bind_text(vm, 2, new_storage_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto rollback;
     rc = sqlite3_step(vm);
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
@@ -1572,6 +1685,8 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
 
     dbmem_database_commit_transaction(db);
     if (vm) sqlite3_finalize(vm);
+    dbmemory_free(resolved_path);
+    dbmemory_free(new_storage_path);
     sqlite3_result_int(context, changes);
     return;
 
@@ -1580,6 +1695,8 @@ rollback:
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
+    dbmemory_free(resolved_path);
+    dbmemory_free(new_storage_path);
     sqlite3_result_error(context, sqlite3_errmsg(db), -1);
 }
 
@@ -1599,6 +1716,15 @@ struct dbmem_json_buffer {
 
 static bool dbmem_path_separator (char c) {
     return c == '/' || c == '\\';
+}
+
+static bool dbmem_path_has_trailing_separator (const char *path) {
+    size_t len = path ? strlen(path) : 0;
+    return len > 0 && dbmem_path_separator(path[len - 1]);
+}
+
+static bool dbmem_path_is_directory_marker (const char *path) {
+    return dbmem_path_has_trailing_separator(path);
 }
 
 static bool dbmem_path_char_equal (char a, char b) {
@@ -1870,7 +1996,8 @@ static bool dbmem_path_group_has_child (dbmem_string_list *paths, int start, int
         const char *path = paths->items[i];
         size_t segment_start = dbmem_path_segment_start(path, offset);
         size_t segment_end = dbmem_path_segment_end(path, segment_start);
-        if (segment_start != segment_end && dbmem_path_has_more_segments(path, segment_end)) return true;
+        if (segment_start != segment_end &&
+            (dbmem_path_has_more_segments(path, segment_end) || dbmem_path_is_directory_marker(path))) return true;
     }
     return false;
 }
@@ -1880,7 +2007,7 @@ static int dbmem_path_group_file_index (dbmem_string_list *paths, int start, int
         const char *path = paths->items[i];
         size_t segment_start = dbmem_path_segment_start(path, offset);
         size_t segment_end = dbmem_path_segment_end(path, segment_start);
-        if (segment_start != segment_end && !dbmem_path_has_more_segments(path, segment_end)) return i;
+        if (segment_start != segment_end && !dbmem_path_has_more_segments(path, segment_end) && !dbmem_path_is_directory_marker(path)) return i;
     }
     return -1;
 }
@@ -2878,6 +3005,41 @@ static char *dbmem_path_storage_copy (const char *path, const char *root) {
     return copy;
 }
 
+static char *dbmem_path_directory_marker_storage_copy (const char *path) {
+    char *base = dbmem_path_storage_copy(path, NULL);
+    if (!base) return NULL;
+    size_t len = strlen(base);
+    if (len == 0) return base;
+
+    char *copy = (char *)dbmemory_alloc((uint64_t)len + 2);
+    if (!copy) {
+        dbmemory_free(base);
+        return NULL;
+    }
+    memcpy(copy, base, len);
+    copy[len] = '/';
+    copy[len + 1] = '\0';
+    dbmemory_free(base);
+    return copy;
+}
+
+static char *dbmem_path_directory_file_storage_copy (const char *path) {
+    char *marker = dbmem_path_directory_marker_storage_copy(path);
+    if (!marker) return NULL;
+
+    size_t len = strlen(marker);
+    while (len > 0 && dbmem_path_separator(marker[len - 1])) len--;
+    char *copy = (char *)dbmemory_alloc((uint64_t)len + 1);
+    if (!copy) {
+        dbmemory_free(marker);
+        return NULL;
+    }
+    memcpy(copy, marker, len);
+    copy[len] = '\0';
+    dbmemory_free(marker);
+    return copy;
+}
+
 static bool dbmem_database_path_conflicts (sqlite3 *db, const char *path, const char *source_path) {
     static const char *sql =
         "SELECT s.source_path FROM dbmem_content c "
@@ -3057,6 +3219,14 @@ static int dbmem_reindex (dbmem_context *ctx) {
             ctx->path = path;
             ctx->source_path = source_path;
             rc = dbmem_process_buffer(ctx, value, value_len);
+        } else if (value && value_len == 0 && path && dbmem_path_is_directory_marker(path)) {
+            ctx->path = path;
+            ctx->source_path = source_path;
+            rc = dbmem_database_add_directory_marker(ctx, path, value, value_len);
+        } else if (value && value_len == 0) {
+            ctx->path = path;
+            ctx->source_path = source_path;
+            rc = dbmem_process_buffer(ctx, value, value_len);
         } else {
             rc = SQLITE_OK;
         }
@@ -3094,6 +3264,7 @@ static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **
 
     // retrieve dbmem_context
     dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3 *db = sqlite3_context_db_handle(context);
     const char *content = (const char *)sqlite3_value_text(argv[0]);
     int len = sqlite3_value_bytes(argv[0]);
 
@@ -3106,7 +3277,7 @@ static void dbmem_add_text (sqlite3_context *context, int argc, sqlite3_value **
     }
 
     int rc = dbmem_process_buffer(ctx, content, len);
-    (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
+    (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : sqlite3_errmsg(db), -1);
 }
 
 static void dbmem_add_content (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -3129,6 +3300,7 @@ static void dbmem_add_content (sqlite3_context *context, int argc, sqlite3_value
     const char *path = (const char *)sqlite3_value_text(argv[0]);
     const char *content = (const char *)sqlite3_value_text(argv[1]);
     int len = sqlite3_value_bytes(argv[1]);
+    bool is_directory_marker = dbmem_path_has_trailing_separator(path);
 
     // reset temp values
     dbmem_context_reset_temp_values(ctx);
@@ -3138,18 +3310,56 @@ static void dbmem_add_content (sqlite3_context *context, int argc, sqlite3_value
         ctx->context = (const char *)sqlite3_value_text(argv[2]);
     }
 
-    char *stored_path = dbmem_path_storage_copy(path, NULL);
+    if (is_directory_marker && len != 0) {
+        sqlite3_result_error(context, "memory_add_content directory markers require empty content", -1);
+        return;
+    }
+    if (is_directory_marker && !ctx->preserve_duplicate_paths) {
+        sqlite3_result_error(context, "memory_add_content directory markers require preserve_duplicate_paths=1", -1);
+        return;
+    }
+
+    char *stored_path = is_directory_marker
+        ? dbmem_path_directory_marker_storage_copy(path)
+        : dbmem_path_storage_copy(path, NULL);
     if (!stored_path) {
         sqlite3_result_error_nomem(context);
         return;
     }
 
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    bool conflict = false;
+    int conflict_rc = SQLITE_OK;
+    char *conflict_path = is_directory_marker
+        ? dbmem_path_directory_file_storage_copy(path)
+        : dbmem_path_directory_marker_storage_copy(path);
+    if (!conflict_path) {
+        dbmemory_free(stored_path);
+        sqlite3_result_error_nomem(context);
+        return;
+    }
+
+    conflict_rc = dbmem_database_path_exists(db, conflict_path, &conflict);
+    dbmemory_free(conflict_path);
+    if (conflict_rc != SQLITE_OK) {
+        dbmemory_free(stored_path);
+        sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+        return;
+    }
+    if (conflict) {
+        dbmemory_free(stored_path);
+        sqlite3_result_error(context, "memory_add_content path conflicts with an existing file or directory marker", -1);
+        return;
+    }
+
     ctx->path = stored_path;
-    int rc = dbmem_process_buffer(ctx, content, len);
+    int rc = is_directory_marker
+        ? dbmem_database_add_directory_marker(ctx, stored_path, content, len)
+        : dbmem_process_buffer(ctx, content, len);
     ctx->path = NULL;
     dbmemory_free(stored_path);
 
-    (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
+    (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : sqlite3_errmsg(db), -1);
 }
 
 #ifndef DBMEM_OMIT_IO
@@ -3385,6 +3595,7 @@ static void dbmem_materialize_files (sqlite3_context *context, int argc, sqlite3
         const char *path = (const char *)sqlite3_column_text(vm, 0);
         const char *content = (const char *)sqlite3_column_text(vm, 1);
         int len = sqlite3_column_bytes(vm, 1);
+        bool is_directory_marker = dbmem_path_is_directory_marker(path);
 
         if (!content) {
             sqlite3_result_error(context, "memory_materialize_files cannot materialize rows with NULL content", -1);
@@ -3404,10 +3615,12 @@ static void dbmem_materialize_files (sqlite3_context *context, int argc, sqlite3
             return;
         }
 
-        rc = dbmem_write_file_bytes(write_path, content, len);
+        rc = is_directory_marker
+            ? dbmem_ensure_directory(write_path)
+            : dbmem_write_file_bytes(write_path, content, len);
         dbmemory_free(write_path);
         if (rc != SQLITE_OK) {
-            sqlite3_result_error(context, "memory_materialize_files failed to write a file", -1);
+            sqlite3_result_error(context, is_directory_marker ? "memory_materialize_files failed to create a directory" : "memory_materialize_files failed to write a file", -1);
             sqlite3_finalize(vm);
             return;
         }
@@ -3469,6 +3682,8 @@ static void dbmem_database_delete_missing_files (sqlite3 *db, const char *dir_pa
         const char *hash_text = (const char *)sqlite3_column_text(vm, 0);
         const char *path = (const char *)sqlite3_column_text(vm, 1);
         const char *source_path = (const char *)sqlite3_column_text(vm, 2);
+
+        if (dbmem_path_is_directory_marker(path)) continue;
 
         bool exists = false;
         if (source_path && source_path[0]) {
@@ -3611,7 +3826,7 @@ static void dbmem_sql_reindex (sqlite3_context *context, int argc, sqlite3_value
         bool hash_matches = (stored_hash == content_hash || stored_hash == scoped_hash);
         uint64_t target_hash = hash_matches
             ? stored_hash
-            : dbmem_storage_hash_compute(value, (size_t)value_len, path, ctx->preserve_duplicate_paths);
+            : dbmem_storage_hash_compute(value, (size_t)value_len, path, ctx->preserve_duplicate_paths || dbmem_path_is_directory_marker(path));
         bool target_has_vault = (value_len == 0) || dbmem_database_hash_has_vault(db, target_hash);
         bool needs_hash_update = !hash_matches;
         bool needs_reindex = (value_len > 0) && (!hash_matches || !target_has_vault);
