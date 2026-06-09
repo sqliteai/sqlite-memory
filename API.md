@@ -337,7 +337,9 @@ Renames an indexed file path in memory without reprocessing content.
 **Notes:**
 - Updates `dbmem_content.path` and keeps any local `dbmem_content_source` metadata attached to the renamed logical path
 - It does not rename the file on disk or change the stored `source_path` value
-- Does not change `hash`, `value`, embeddings, or FTS entries
+- With `preserve_duplicate_paths=1`, recomputes the path-scoped `hash` and updates related embedding and FTS rows
+- With `preserve_duplicate_paths=1`, rename requires saved content; if `save_content=0` was used for the row, `memory_rename_file()` returns an error because the path-scoped hash cannot be recomputed safely
+- Does not change `value` or stored embedding/FTS content
 - Fails if `new_path` already exists because `dbmem_content.path` is unique
 - Explicit directory markers can be renamed only to another trailing-slash marker path; this renames only the marker row, not child paths
 - Fails if `old_path` matches more than one row across `path` and local `dbmem_content_source.source_path`; pass a unique logical path or exact local source path
@@ -829,7 +831,7 @@ sqlite3_memory_register_provider(db, "my-engine", &provider);
 | `max_tokens` | INTEGER | 400 | Maximum tokens per chunk |
 | `overlay_tokens` | INTEGER | 80 | Token overlap between consecutive chunks |
 | `chars_per_tokens` | INTEGER | 4 | Estimated characters per token |
-| `save_content` | INTEGER | 1 | Store original content (1=yes, 0=no) |
+| `save_content` | INTEGER | 1 | Store original content (1=yes, 0=no). Required for renaming rows created with `preserve_duplicate_paths=1` |
 | `skip_semantic` | INTEGER | 0 | Skip markdown parsing, treat as raw text |
 | `skip_html` | INTEGER | 1 | Strip HTML tags when parsing |
 | `extensions` | TEXT | "md,mdx" | Comma-separated file extensions to process |

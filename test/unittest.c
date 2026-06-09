@@ -3680,6 +3680,156 @@ TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_rename_file_rekeys_preserved_empty_path_hash) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('untitled-1.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_rename_file('untitled-1.md', '1.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('untitled-1.md', '');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path IN ('1.md', 'untitled-1.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    rc = exec_get_int(db, "SELECT COUNT(DISTINCT hash) FROM dbmem_content WHERE path IN ('1.md', 'untitled-1.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_rekeys_preserved_index_hashes) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('untitled-1.md', '# Heading\nIndexed body text.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char old_hash[DBMEM_HASH_STR_MAXLEN];
+    rc = exec_get_text(db, "SELECT hash FROM dbmem_content WHERE path = 'untitled-1.md';", old_hash, sizeof(old_hash));
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char *sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%q';", old_hash);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result > 0);
+
+    sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault_fts WHERE hash = '%q';", old_hash);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result > 0);
+
+    rc = exec_get_int(db, "SELECT memory_rename_file('untitled-1.md', '1.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    char new_hash[DBMEM_HASH_STR_MAXLEN];
+    rc = exec_get_text(db, "SELECT hash FROM dbmem_content WHERE path = '1.md';", new_hash, sizeof(new_hash));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(strcmp(old_hash, new_hash) != 0);
+
+    sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%q';", old_hash);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault WHERE hash = '%q';", new_hash);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result > 0);
+
+    sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault_fts WHERE hash = '%q';", old_hash);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sql = sqlite3_mprintf("SELECT COUNT(*) FROM dbmem_vault_fts WHERE hash = '%q';", new_hash);
+    ASSERT(sql != NULL);
+    rc = exec_get_int(db, sql, &result);
+    sqlite3_free(sql);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(result > 0);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('untitled-1.md', '# Heading\nIndexed body text.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path IN ('1.md', 'untitled-1.md');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 2);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_rename_file_rejects_preserved_path_without_saved_content) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('preserve_duplicate_paths', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('save_content', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('untitled-1.md', '# Heading\nUnsaved body text.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_rename_file('untitled-1.md', '1.md');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT_EQ(rc, SQLITE_ERROR);
+    ASSERT(strstr(sqlite3_errmsg(db), "save_content=0") != NULL);
+    sqlite3_finalize(stmt);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = 'untitled-1.md';", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content WHERE path = '1.md';", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    sqlite3_close(db);
+}
+
 TEST(sqlite_memory_add_content_keeps_same_empty_path_idempotent_when_preserving_duplicates) {
     sqlite3 *db = open_test_db();
     ASSERT(db != NULL);
@@ -5217,6 +5367,9 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_preserve_duplicate_paths_option_defaults_to_zero);
     RUN_TEST(sqlite_memory_add_content_stores_empty_content);
     RUN_TEST(sqlite_memory_add_content_preserves_duplicate_empty_paths_when_enabled);
+    RUN_TEST(sqlite_memory_rename_file_rekeys_preserved_empty_path_hash);
+    RUN_TEST(sqlite_memory_rename_file_rekeys_preserved_index_hashes);
+    RUN_TEST(sqlite_memory_rename_file_rejects_preserved_path_without_saved_content);
     RUN_TEST(sqlite_memory_add_content_keeps_same_empty_path_idempotent_when_preserving_duplicates);
     RUN_TEST(sqlite_memory_add_content_requires_preserve_for_directory_marker);
     RUN_TEST(sqlite_memory_add_content_creates_directory_marker);

@@ -1584,12 +1584,15 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
     }
 
     sqlite3 *db = sqlite3_context_db_handle(context);
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
     const char *old_path = (const char *)sqlite3_value_text(argv[0]);
     const char *new_path = (const char *)sqlite3_value_text(argv[1]);
     uint64_t hash = 0;
+    uint64_t new_hash = 0;
     int matches = 0;
     char *resolved_path = NULL;
     char *new_storage_path = NULL;
+    const char *result_error = NULL;
 
     int rc = dbmem_resolve_content_hash_for_path(db, old_path, &hash, &matches);
     if (rc != SQLITE_OK) {
@@ -1659,11 +1662,66 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
     rc = dbmem_database_begin_transaction(db);
     if (rc != SQLITE_OK) goto cleanup;
 
-    rc = sqlite3_prepare_v2(db, "UPDATE dbmem_content SET path = ?2 WHERE hash = ?1;", -1, &vm, NULL);
+    new_hash = hash;
+    if (ctx->preserve_duplicate_paths) {
+        rc = sqlite3_prepare_v2(db, "SELECT value FROM dbmem_content WHERE hash = ?1;", -1, &vm, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+        rc = dbmem_bind_hash(vm, 1, hash);
+        if (rc != SQLITE_OK) goto rollback;
+        rc = sqlite3_step(vm);
+        if (rc == SQLITE_ROW) {
+            if (sqlite3_column_type(vm, 0) == SQLITE_NULL) {
+                result_error = "memory_rename_file cannot rekey preserve_duplicate_paths content when save_content=0";
+                sqlite3_finalize(vm);
+                vm = NULL;
+                rc = SQLITE_ERROR;
+                goto rollback;
+            }
+            const char *value = (const char *)sqlite3_column_text(vm, 0);
+            int value_len = sqlite3_column_bytes(vm, 0);
+            new_hash = dbmem_storage_hash_compute(value, (size_t)value_len, new_storage_path, true);
+        }
+        if (rc == SQLITE_ROW || rc == SQLITE_DONE) rc = SQLITE_OK;
+        if (rc != SQLITE_OK) goto rollback;
+        sqlite3_finalize(vm);
+        vm = NULL;
+    }
+
+    if (new_hash != hash) {
+        rc = sqlite3_prepare_v2(db, "UPDATE dbmem_vault SET hash = ?2 WHERE hash = ?1;", -1, &vm, NULL);
+        if (rc != SQLITE_OK) goto rollback;
+        rc = dbmem_bind_hash(vm, 1, hash);
+        if (rc != SQLITE_OK) goto rollback;
+        rc = dbmem_bind_hash(vm, 2, new_hash);
+        if (rc != SQLITE_OK) goto rollback;
+        rc = sqlite3_step(vm);
+        if (rc == SQLITE_DONE) rc = SQLITE_OK;
+        if (rc != SQLITE_OK) goto rollback;
+        sqlite3_finalize(vm);
+        vm = NULL;
+
+        if (fts5_is_available) {
+            rc = sqlite3_prepare_v2(db, "UPDATE dbmem_vault_fts SET hash = ?2 WHERE hash = ?1;", -1, &vm, NULL);
+            if (rc != SQLITE_OK) goto rollback;
+            rc = dbmem_bind_hash(vm, 1, hash);
+            if (rc != SQLITE_OK) goto rollback;
+            rc = dbmem_bind_hash(vm, 2, new_hash);
+            if (rc != SQLITE_OK) goto rollback;
+            rc = sqlite3_step(vm);
+            if (rc == SQLITE_DONE) rc = SQLITE_OK;
+            if (rc != SQLITE_OK) goto rollback;
+            sqlite3_finalize(vm);
+            vm = NULL;
+        }
+    }
+
+    rc = sqlite3_prepare_v2(db, "UPDATE dbmem_content SET hash = ?2, path = ?3 WHERE hash = ?1;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto rollback;
     rc = dbmem_bind_hash(vm, 1, hash);
     if (rc != SQLITE_OK) goto rollback;
-    rc = sqlite3_bind_text(vm, 2, new_storage_path, -1, SQLITE_STATIC);
+    rc = dbmem_bind_hash(vm, 2, new_hash);
+    if (rc != SQLITE_OK) goto rollback;
+    rc = sqlite3_bind_text(vm, 3, new_storage_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto rollback;
 
     rc = sqlite3_step(vm);
@@ -1697,7 +1755,7 @@ cleanup:
     if (vm) sqlite3_finalize(vm);
     dbmemory_free(resolved_path);
     dbmemory_free(new_storage_path);
-    sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+    sqlite3_result_error(context, result_error ? result_error : sqlite3_errmsg(db), -1);
 }
 
 // MARK: - Path Listing -
