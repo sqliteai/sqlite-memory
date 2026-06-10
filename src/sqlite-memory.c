@@ -3016,7 +3016,9 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
         rc = dbmem_database_add_vault_sentinel(ctx);
     }
 
-    if (rc == SQLITE_OK && !ctx->dimension_saved) {
+    // persist the dimension only after a real embedding established it:
+    // a zero-chunk parse would latch dimension=0 and block the real write
+    if (rc == SQLITE_OK && ctx->chunks_added > 0 && !ctx->dimension_saved) {
         // make sure to serialize dimension
         dbmem_settings_write_int(db, DBMEM_SETTINGS_KEY_DIMENSION, ctx->dimension);
         ctx->dimension_saved = true;

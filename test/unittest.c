@@ -5407,6 +5407,39 @@ TEST(sqlite_memory_zero_chunk_content_marks_processed_with_sentinel) {
     sqlite3_close(db);
 }
 
+TEST(sqlite_memory_zero_chunk_first_add_does_not_persist_zero_dimension) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // a zero-chunk first add must not latch dimension=0 into dbmem_settings
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/blank.md', '  ' || char(10) || char(9));", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_settings WHERE key = 'dimension';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    // the first real embedding persists the provider dimension
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/real.md', '# Title' || char(10) || 'Real body text.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 dimension = -1;
+    rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'dimension';", &dimension);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(dimension, 4);
+
+    sqlite3_close(db);
+}
+
 #ifndef DBMEM_OMIT_LOCAL_ENGINE
 TEST(sqlite_local_logger_ignores_stale_user_data) {
     dbmem_logger(GGML_LOG_LEVEL_WARN, "ignored warning", (void *)1);
@@ -5637,6 +5670,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_defer_embeddings_requires_save_content);
     RUN_TEST(sqlite_memory_embed_pending_embeds_deferred_content_in_batches);
     RUN_TEST(sqlite_memory_zero_chunk_content_marks_processed_with_sentinel);
+    RUN_TEST(sqlite_memory_zero_chunk_first_add_does_not_persist_zero_dimension);
 
 #ifndef DBMEM_OMIT_REMOTE_ENGINE
     RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
