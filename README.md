@@ -245,6 +245,25 @@ Directory markers are listed as directories, materialized as directories by `mem
 
 This makes all sync functions safe to call repeatedly - for example, on a cron schedule or at agent startup - with minimal overhead.
 
+## Deferred Embeddings
+
+For interactive workflows (e.g. a dashboard upload) where content should appear immediately and embeddings can be computed later by a background process, enable deferred mode:
+
+```sql
+-- store content instantly: no embedding model needed, nothing is computed
+SELECT memory_set_option('defer_embeddings', 1);
+SELECT memory_add_content('docs/api.md', '# API\nUploaded from the dashboard.');
+
+-- pending files are visible right away ("indexed":false in the JSON tree)
+SELECT memory_list_files();
+
+-- later, from a background worker: embed in batches and report progress
+SELECT memory_embed_pending(10);   -- returns rows processed in this batch
+SELECT memory_pending_count();     -- rows still waiting
+```
+
+Deferred content is stored in `dbmem_content` but is invisible to `memory_search` until it is embedded. Each file is embedded in its own transaction, so a file is either fully indexed or still pending — an interrupted worker can simply be restarted, and other connections can watch progress while a batch runs.
+
 ## Agent Memory Sync
 
 Multiple agents can share and merge knowledge without any coordination. Each agent works independently with its own local SQLite database, syncing through a shared [SQLiteCloud](https://sqlitecloud.io/) managed database when connectivity is available.

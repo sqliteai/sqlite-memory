@@ -311,6 +311,7 @@ Indexes caller-provided file content without reading from the filesystem.
 - With `preserve_duplicate_paths=1`, an empty `content` value and a trailing slash in `path` creates an explicit empty directory marker, for example `memory_add_content('dirname/', '')`
 - Directory markers are stored in `dbmem_content` with a trailing slash path, are shown as directories by `memory_list_files()`, and are not indexed for search
 - Directory marker paths cannot contain non-empty content and cannot conflict with a file path of the same name
+- With `defer_embeddings=1`, content is stored without computing embeddings or FTS entries (no embedding model required); generate them later with `memory_embed_pending()`
 - Available even when compiled with `DBMEM_OMIT_IO`
 
 **Example:**
@@ -433,11 +434,12 @@ Returns a JSON tree with the indexed directories and files stored in `dbmem_cont
 - Directory nodes are derived from indexed file paths and explicit directory markers
 - Path separators are normalized to `/` in the returned JSON
 - Sibling nodes are sorted with directories first, then files; each group is alphabetical
+- File nodes include an `indexed` boolean: `false` while content is waiting for embedding generation (see `defer_embeddings` and `memory_embed_pending()`), `true` otherwise
 
 **Example:**
 ```sql
 SELECT memory_list_files();
--- {"root":"","children":[{"type":"directory","name":"docs","path":"docs","children":[{"type":"file","name":"readme.md","path":"docs/readme.md"}]}]}
+-- {"root":"","children":[{"type":"directory","name":"docs","path":"docs","children":[{"type":"file","name":"readme.md","path":"docs/readme.md","indexed":true}]}]}
 ```
 
 ---
@@ -648,6 +650,60 @@ SELECT memory_reindex();
 
 ---
 
+#### `memory_embed_pending([limit INTEGER])`
+
+Generates embeddings and FTS entries for content stored without them (see the `defer_embeddings` option).
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | INTEGER | No | Maximum number of pending content rows to process in this call (must be positive). When omitted, all pending rows are processed |
+
+**Returns:** INTEGER - Number of pending content rows processed
+
+**Notes:**
+- Requires an embedding model configured with `memory_set_model()` or loaded from persisted provider/model settings
+- A content row is pending when it has a non-empty stored `value` and no `dbmem_vault` entries
+- Each row is processed in its own SAVEPOINT transaction, so a row is either fully indexed or untouched; a failed or interrupted call can simply be retried and other connections can observe per-file progress while a batch is running
+- Content whose parsing produces no chunks (e.g. whitespace-only text) is marked as processed so it is not retried
+- Designed for background workers: call in a loop with a small `limit` and poll `memory_pending_count()` to report progress
+- Returns 0 when nothing is pending
+
+**Example:**
+```sql
+-- store content instantly, without embeddings
+SELECT memory_set_option('defer_embeddings', 1);
+SELECT memory_add_content('docs/api.md', '# API\nUploaded from the dashboard.');
+
+-- later, from a background process: embed in batches of 10
+SELECT memory_embed_pending(10);
+
+-- or process the whole backlog in one call
+SELECT memory_embed_pending();
+```
+
+---
+
+#### `memory_pending_count()`
+
+Returns the number of content rows waiting for embedding generation.
+
+**Parameters:** None
+
+**Returns:** INTEGER - Number of pending content rows
+
+**Notes:**
+- Counts rows with a non-empty stored `value` and no `dbmem_vault` entries
+- Useful for progress reporting: `1 - pending/total` while a `memory_embed_pending()` loop is running
+- Empty files and directory markers are never counted as pending
+
+**Example:**
+```sql
+SELECT memory_pending_count();
+```
+
+---
+
 ### `memory_search`
 
 A virtual table for performing hybrid semantic search.
@@ -846,6 +902,7 @@ sqlite3_memory_register_provider(db, "my-engine", &provider);
 | `cache_max_entries` | INTEGER | 0 | Max cache entries (0 = no limit). When exceeded, oldest entries are evicted |
 | `search_oversample` | INTEGER | 0 | Search oversampling multiplier (0 = no oversampling). When set, retrieves N * multiplier candidates from each index before merging down to N final results |
 | `preserve_duplicate_paths` | INTEGER | 0 | Preserve distinct logical paths for identical or empty content. When enabled, `dbmem_content.hash` is path-scoped and identifies an entry rather than only the raw content |
+| `defer_embeddings` | INTEGER | 0 | Store content without computing embeddings or FTS entries. Deferred content is invisible to search until processed with `memory_embed_pending()` or `memory_reindex()`. Requires `save_content=1` |
 
 ---
 

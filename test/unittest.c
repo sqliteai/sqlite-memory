@@ -2028,7 +2028,7 @@ TEST(sqlite_memory_list_files_strips_common_full_path) {
     char json[1024];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"directory\",\"name\":\"nested\",\"path\":\"docs/nested\",\"children\":[{\"type\":\"file\",\"name\":\"beta.md\",\"path\":\"docs/nested/beta.md\"}]},{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"docs/alpha.md\"}]},{\"type\":\"file\",\"name\":\"zeta.md\",\"path\":\"zeta.md\"}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"directory\",\"name\":\"nested\",\"path\":\"docs/nested\",\"children\":[{\"type\":\"file\",\"name\":\"beta.md\",\"path\":\"docs/nested/beta.md\",\"indexed\":false}]},{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"docs/alpha.md\",\"indexed\":false}]},{\"type\":\"file\",\"name\":\"zeta.md\",\"path\":\"zeta.md\",\"indexed\":false}]}");
 
     sqlite3_close(db);
 }
@@ -2047,7 +2047,7 @@ TEST(sqlite_memory_list_files_keeps_relative_paths) {
     char json[1024];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"notes\",\"path\":\"notes\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"notes/docs\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"notes/docs/alpha.md\"}]},{\"type\":\"file\",\"name\":\"zeta.md\",\"path\":\"notes/zeta.md\"}]}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"notes\",\"path\":\"notes\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"notes/docs\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"notes/docs/alpha.md\",\"indexed\":false}]},{\"type\":\"file\",\"name\":\"zeta.md\",\"path\":\"notes/zeta.md\",\"indexed\":false}]}]}");
 
     sqlite3_close(db);
 }
@@ -2065,7 +2065,7 @@ TEST(sqlite_memory_list_files_strips_single_full_path_directory) {
     char json[512];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"file\",\"name\":\"readme.md\",\"path\":\"readme.md\"}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"file\",\"name\":\"readme.md\",\"path\":\"readme.md\",\"indexed\":false}]}");
 
     sqlite3_close(db);
 }
@@ -2084,7 +2084,7 @@ TEST(sqlite_memory_list_files_normalizes_windows_separators) {
     char json[1024];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"beta.md\",\"path\":\"docs/beta.md\"}]},{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"alpha.md\"}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"beta.md\",\"path\":\"docs/beta.md\",\"indexed\":false}]},{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"alpha.md\",\"indexed\":false}]}");
 
     sqlite3_close(db);
 }
@@ -2103,7 +2103,7 @@ TEST(sqlite_memory_list_files_does_not_strip_mixed_path_types) {
     char json[2048];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"notes\",\"path\":\"notes\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"notes/alpha.md\"}]},{\"type\":\"directory\",\"name\":\"tmp\",\"path\":\"/tmp\",\"children\":[{\"type\":\"directory\",\"name\":\"dbmem\",\"path\":\"/tmp/dbmem\",\"children\":[{\"type\":\"directory\",\"name\":\"project\",\"path\":\"/tmp/dbmem/project\",\"children\":[{\"type\":\"file\",\"name\":\"readme.md\",\"path\":\"/tmp/dbmem/project/readme.md\"}]}]}]}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"notes\",\"path\":\"notes\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"notes/alpha.md\",\"indexed\":false}]},{\"type\":\"directory\",\"name\":\"tmp\",\"path\":\"/tmp\",\"children\":[{\"type\":\"directory\",\"name\":\"dbmem\",\"path\":\"/tmp/dbmem\",\"children\":[{\"type\":\"directory\",\"name\":\"project\",\"path\":\"/tmp/dbmem/project\",\"children\":[{\"type\":\"file\",\"name\":\"readme.md\",\"path\":\"/tmp/dbmem/project/readme.md\",\"indexed\":false}]}]}]}]}");
 
     sqlite3_close(db);
 }
@@ -2122,7 +2122,7 @@ TEST(sqlite_memory_list_files_omits_empty_paths) {
     char json[512];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"docs/alpha.md\"}]}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"alpha.md\",\"path\":\"docs/alpha.md\",\"indexed\":false}]}]}");
 
     sqlite3_close(db);
 }
@@ -2140,7 +2140,7 @@ TEST(sqlite_memory_list_files_escapes_json_strings) {
     char json[512];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"a\\\"b.md\",\"path\":\"docs/a\\\"b.md\"}]}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"docs\",\"path\":\"docs\",\"children\":[{\"type\":\"file\",\"name\":\"a\\\"b.md\",\"path\":\"docs/a\\\"b.md\",\"indexed\":false}]}]}");
 
     sqlite3_close(db);
 }
@@ -2177,7 +2177,36 @@ TEST(sqlite_memory_list_files_merges_directory_marker_with_children) {
     char json[512];
     rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"dirname\",\"path\":\"dirname\",\"children\":[{\"type\":\"file\",\"name\":\"file.md\",\"path\":\"dirname/file.md\"}]}]}");
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":[{\"type\":\"directory\",\"name\":\"dirname\",\"path\":\"dirname\",\"children\":[{\"type\":\"file\",\"name\":\"file.md\",\"path\":\"dirname/file.md\",\"indexed\":false}]}]}");
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_list_files_reports_indexed_flag) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    int rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_content (hash, path, value, length, context, created_at) VALUES "
+        "(printf('%016x', 801), 'done.md', 'v1', 2, NULL, 0), "
+        "(printf('%016x', 802), 'todo.md', 'v2', 2, NULL, 0), "
+        "(printf('%016x', 803), 'empty.md', '', 0, NULL, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = sqlite3_exec(db,
+        "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length, n_tokens, truncated) "
+        "VALUES (printf('%016x', 801), 0, zeroblob(16), 0, 2, 1, 0);",
+        NULL, NULL, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    char json[1024];
+    rc = exec_get_text(db, "SELECT memory_list_files();", json, sizeof(json));
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_STR_EQ(json, "{\"root\":\"\",\"children\":["
+        "{\"type\":\"file\",\"name\":\"done.md\",\"path\":\"done.md\",\"indexed\":true},"
+        "{\"type\":\"file\",\"name\":\"empty.md\",\"path\":\"empty.md\",\"indexed\":true},"
+        "{\"type\":\"file\",\"name\":\"todo.md\",\"path\":\"todo.md\",\"indexed\":false}]}");
 
     sqlite3_close(db);
 }
@@ -4887,9 +4916,14 @@ TEST(sqlite_custom_provider_skips_whitespace_only_text) {
     ASSERT_EQ(result, 1);
     ASSERT_EQ(dummy_compute_calls, 0);
 
+    // no embeddings are computed: the only vault row is the zero-chunk sentinel
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &result);
     ASSERT_EQ(rc, SQLITE_OK);
-    ASSERT_EQ(result, 0);
+    ASSERT_EQ(result, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE length(embedding) = 0 AND n_tokens = 0;", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
 
     rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_cache;", &result);
     ASSERT_EQ(rc, SQLITE_OK);
@@ -5169,6 +5203,243 @@ TEST(sqlite_set_model_failed_remote_switch_keeps_custom_engine) {
 }
 #endif
 
+// ============================================================================
+// Deferred Embeddings Tests
+// ============================================================================
+
+TEST(sqlite_memory_defer_embeddings_stores_content_without_index) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = -1;
+    int rc = exec_get_int(db, "SELECT memory_get_option('defer_embeddings');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 0);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('defer_embeddings', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // no model configured: a deferred add must succeed without an embedding engine
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/deferred.md', '# Title\nDeferred body text.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_content;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    // embedding pending content requires a configured model
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_embed_pending();", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    const char *msg = sqlite3_errmsg(db);
+    ASSERT(strstr(msg, "no embedding model") != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_defer_embeddings_requires_save_content) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    sqlite3_int64 result = 0;
+    int rc = exec_get_int(db, "SELECT memory_set_option('defer_embeddings', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_set_option('save_content', 0);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_stmt *stmt = NULL;
+    rc = sqlite3_prepare_v2(db, "SELECT memory_add_content('docs/nosave.md', 'Body text.');", -1, &stmt, NULL);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    ASSERT(rc == SQLITE_ERROR);
+    const char *msg = sqlite3_errmsg(db);
+    ASSERT(strstr(msg, "save_content") != NULL);
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_embed_pending_embeds_deferred_content_in_batches) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_set_option('defer_embeddings', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/a.md', '# A\nAlpha body content.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/b.md', '# B\nBeta body content.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/c.md', '# C\nGamma body content.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 3);
+
+    rc = exec_get_int(db, "SELECT memory_embed_pending(2);", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT memory_embed_pending();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT(count >= 3);
+
+    sqlite3_int64 fts_count = -1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts;", &fts_count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(fts_count, count);
+
+    rc = exec_get_int(db,
+        "SELECT COUNT(*) FROM dbmem_content c WHERE NOT EXISTS (SELECT 1 FROM dbmem_vault v WHERE v.hash = c.hash);",
+        &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT memory_embed_pending();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_zero_chunk_content_marks_processed_with_sentinel) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    int calls_before = dummy_compute_calls;
+
+    // whitespace-only content parses to zero chunks: a sentinel vault row marks it processed
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/blank.md', '   ' || char(10) || char(9) || char(10));", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(result, 1);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE length(embedding) = 0 AND n_tokens = 0;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault_fts;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    ASSERT_EQ(dummy_compute_calls, calls_before);
+
+    // deferred zero-chunk content resolves through memory_embed_pending the same way
+    rc = exec_get_int(db, "SELECT memory_set_option('defer_embeddings', 1);", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/blank2.md', char(10) || '  ' || char(10));", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT memory_embed_pending();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 1);
+
+    rc = exec_get_int(db, "SELECT memory_pending_count();", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_vault WHERE length(embedding) = 0 AND n_tokens = 0;", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 2);
+
+    ASSERT_EQ(dummy_compute_calls, calls_before);
+
+    sqlite3_close(db);
+}
+
+TEST(sqlite_memory_zero_chunk_first_add_does_not_persist_zero_dimension) {
+    sqlite3 *db = open_test_db();
+    ASSERT(db != NULL);
+
+    dbmem_provider_t prov = { .init = dummy_init, .compute = dummy_compute, .free = dummy_free };
+    int rc = sqlite3_memory_register_provider(db, "dummy", &prov);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 result = 0;
+    rc = exec_get_int(db, "SELECT memory_set_model('dummy', 'test-model');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    // a zero-chunk first add must not latch dimension=0 into dbmem_settings
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/blank.md', '  ' || char(10) || char(9));", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 count = -1;
+    rc = exec_get_int(db, "SELECT COUNT(*) FROM dbmem_settings WHERE key = 'dimension';", &count);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(count, 0);
+
+    // the first real embedding persists the provider dimension
+    rc = exec_get_int(db, "SELECT memory_add_content('docs/real.md', '# Title' || char(10) || 'Real body text.');", &result);
+    ASSERT_EQ(rc, SQLITE_OK);
+
+    sqlite3_int64 dimension = -1;
+    rc = exec_get_int(db, "SELECT value FROM dbmem_settings WHERE key = 'dimension';", &dimension);
+    ASSERT_EQ(rc, SQLITE_OK);
+    ASSERT_EQ(dimension, 4);
+
+    sqlite3_close(db);
+}
+
 #ifndef DBMEM_OMIT_LOCAL_ENGINE
 TEST(sqlite_local_logger_ignores_stale_user_data) {
     dbmem_logger(GGML_LOG_LEVEL_WARN, "ignored warning", (void *)1);
@@ -5299,6 +5570,7 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_memory_list_files_escapes_json_strings);
     RUN_TEST(sqlite_memory_list_files_includes_empty_directory_marker);
     RUN_TEST(sqlite_memory_list_files_merges_directory_marker_with_children);
+    RUN_TEST(sqlite_memory_list_files_reports_indexed_flag);
     RUN_TEST(sqlite_memory_materialize_files_creates_directories_and_files);
     RUN_TEST(sqlite_memory_materialize_files_creates_directory_markers);
     RUN_TEST(sqlite_memory_materialize_files_accepts_existing_same_content);
@@ -5392,6 +5664,14 @@ int main(int argc, char *argv[]) {
     RUN_TEST(sqlite_custom_provider_init_error);
     RUN_TEST(sqlite_custom_provider_apikey_passed);
     RUN_TEST(sqlite_set_model_failed_reindex_preserves_existing_rows);
+
+    printf("\nDeferred embeddings tests:\n");
+    RUN_TEST(sqlite_memory_defer_embeddings_stores_content_without_index);
+    RUN_TEST(sqlite_memory_defer_embeddings_requires_save_content);
+    RUN_TEST(sqlite_memory_embed_pending_embeds_deferred_content_in_batches);
+    RUN_TEST(sqlite_memory_zero_chunk_content_marks_processed_with_sentinel);
+    RUN_TEST(sqlite_memory_zero_chunk_first_add_does_not_persist_zero_dimension);
+
 #ifndef DBMEM_OMIT_REMOTE_ENGINE
     RUN_TEST(sqlite_set_model_releases_previous_engine_on_class_switch);
 #else

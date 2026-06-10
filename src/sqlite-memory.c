@@ -65,6 +65,7 @@ SQLITE_EXTENSION_INIT1
 #define DBMEM_SETTINGS_KEY_CACHE_MAX_ENTRIES    "cache_max_entries"
 #define DBMEM_SETTINGS_KEY_SEARCH_OVERSAMPLE    "search_oversample"
 #define DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS   "preserve_duplicate_paths"
+#define DBMEM_SETTINGS_KEY_DEFER_EMBEDDINGS     "defer_embeddings"
 #define DBMEM_SETTINGS_KEY_SCHEMA_VERSION       "schema_version"
 
 #define DBMEM_SCHEMA_VERSION                    4
@@ -128,6 +129,7 @@ struct dbmem_context {
     int         cache_max_entries;              // Max cache entries (0 = no limit)
     int         search_oversample;             // Search oversampling multiplier (0 = no oversampling)
     bool        preserve_duplicate_paths;       // Keep separate rows for distinct paths with identical content
+    bool        defer_embeddings;               // Store content without computing embeddings (use memory_embed_pending later)
 
     // Cache
     float       *cache_buffer;                  // Reusable buffer for cache hits
@@ -135,6 +137,7 @@ struct dbmem_context {
 
     // Runtime state
     int64_t     counter;                        // Chunk counter during file processing
+    int64_t     chunks_added;                   // Vault rows inserted while processing the current buffer
     uint64_t    hash;                           // Hash of the current text
     const char  *context;                       // Optional context string for current operation
     const char  *path;                          // Portable relative file path (optional)
@@ -151,7 +154,7 @@ typedef struct dbmem_json_buffer dbmem_json_buffer;
 static int dbmem_database_begin_transaction (sqlite3 *db);
 static int dbmem_database_commit_transaction (sqlite3 *db);
 static int dbmem_database_rollback_transaction (sqlite3 *db);
-static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset);
+static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, const unsigned char *flags, int start, int end, size_t offset);
 static char *dbmem_path_normalized_copy (const char *path);
 static char *dbmem_path_unique_storage_copy (sqlite3 *db, const char *preferred_path, const char *source_path);
 static char *dbmem_path_directory_marker_storage_copy (const char *path);
@@ -346,6 +349,12 @@ static int dbmem_settings_sync (dbmem_context *ctx, const char *key, sqlite3_val
     if (strcasecmp(key, DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS) == 0) {
         int n = sqlite3_value_int(value);
         ctx->preserve_duplicate_paths = (n > 0) ? 1 : 0;
+        return 0;
+    }
+
+    if (strcasecmp(key, DBMEM_SETTINGS_KEY_DEFER_EMBEDDINGS) == 0) {
+        int n = sqlite3_value_int(value);
+        ctx->defer_embeddings = (n > 0) ? 1 : 0;
         return 0;
     }
 
@@ -1036,6 +1045,27 @@ static int dbmem_database_add_fts5 (dbmem_context *ctx, const char *text, size_t
 
 cleanup:
     if (rc != SQLITE_OK) DEBUG_DBMEM_ALWAYS("Error in dbmem_database_add_fts5: %s", sqlite3_errmsg(ctx->db));
+    if (vm) sqlite3_finalize(vm);
+    return rc;
+}
+
+static int dbmem_database_add_vault_sentinel (dbmem_context *ctx) {
+    // a zero-length embedding marks content whose parsing produced no chunks as processed,
+    // so it is excluded from the pending predicate (sqlite-vector skips undersized blobs during scans)
+    static const char *sql = "INSERT INTO dbmem_vault (hash, seq, embedding, offset, length, n_tokens, truncated) VALUES (?1, 0, zeroblob(0), 0, 0, 0, 0);";
+
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(ctx->db, sql, -1, &vm, NULL);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = dbmem_bind_hash(vm, 1, ctx->hash);
+    if (rc != SQLITE_OK) goto cleanup;
+
+    rc = sqlite3_step(vm);
+    if (rc == SQLITE_DONE) rc = SQLITE_OK;
+
+cleanup:
+    if (rc != SQLITE_OK) DEBUG_DBMEM_ALWAYS("Error in dbmem_database_add_vault_sentinel: %s", sqlite3_errmsg(ctx->db));
     if (vm) sqlite3_finalize(vm);
     return rc;
 }
@@ -2070,7 +2100,7 @@ static int dbmem_path_group_file_index (dbmem_string_list *paths, int start, int
     return -1;
 }
 
-static int dbmem_json_append_file_node (dbmem_json_buffer *json, const char *path, size_t segment_start, size_t segment_end) {
+static int dbmem_json_append_file_node (dbmem_json_buffer *json, const char *path, bool indexed, size_t segment_start, size_t segment_end) {
     int rc = dbmem_json_buffer_append(json, "{\"type\":\"file\",\"name\":");
     if (rc != SQLITE_OK) return rc;
     rc = dbmem_json_buffer_append_escaped_len(json, path + segment_start, segment_end - segment_start);
@@ -2079,10 +2109,12 @@ static int dbmem_json_append_file_node (dbmem_json_buffer *json, const char *pat
     if (rc != SQLITE_OK) return rc;
     rc = dbmem_json_buffer_append_escaped(json, path);
     if (rc != SQLITE_OK) return rc;
+    rc = dbmem_json_buffer_append(json, indexed ? ",\"indexed\":true" : ",\"indexed\":false");
+    if (rc != SQLITE_OK) return rc;
     return dbmem_json_buffer_append_char(json, '}');
 }
 
-static int dbmem_json_append_directory_node (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset) {
+static int dbmem_json_append_directory_node (dbmem_json_buffer *json, dbmem_string_list *paths, const unsigned char *flags, int start, int end, size_t offset) {
     const char *path = paths->items[start];
     size_t segment_start = dbmem_path_segment_start(path, offset);
     size_t segment_end = dbmem_path_segment_end(path, segment_start);
@@ -2097,12 +2129,12 @@ static int dbmem_json_append_directory_node (dbmem_json_buffer *json, dbmem_stri
     if (rc != SQLITE_OK) return rc;
     rc = dbmem_json_buffer_append(json, ",\"children\":");
     if (rc != SQLITE_OK) return rc;
-    rc = dbmem_json_append_tree_children(json, paths, start, end, segment_end);
+    rc = dbmem_json_append_tree_children(json, paths, flags, start, end, segment_end);
     if (rc != SQLITE_OK) return rc;
     return dbmem_json_buffer_append_char(json, '}');
 }
 
-static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, int start, int end, size_t offset) {
+static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, const unsigned char *flags, int start, int end, size_t offset) {
     int rc = dbmem_json_buffer_append_char(json, '[');
     if (rc != SQLITE_OK) return rc;
 
@@ -2130,12 +2162,13 @@ static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_strin
                 first = false;
 
                 if (emit_directory) {
-                    rc = dbmem_json_append_directory_node(json, paths, i, group_end, offset);
+                    rc = dbmem_json_append_directory_node(json, paths, flags, i, group_end, offset);
                 } else {
                     const char *file_path = paths->items[file_index];
+                    bool indexed = flags ? (flags[file_index] != 0) : true;
                     segment_start = dbmem_path_segment_start(file_path, offset);
                     size_t segment_end = dbmem_path_segment_end(file_path, segment_start);
-                    rc = dbmem_json_append_file_node(json, file_path, segment_start, segment_end);
+                    rc = dbmem_json_append_file_node(json, file_path, indexed, segment_start, segment_end);
                 }
                 if (rc != SQLITE_OK) return rc;
             }
@@ -2147,7 +2180,18 @@ static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_strin
     return dbmem_json_buffer_append_char(json, ']');
 }
 
-static int dbmem_paths_to_json (dbmem_string_list *paths, char **result) {
+typedef struct {
+    char *path;
+    unsigned char indexed;
+} dbmem_path_entry;
+
+static int dbmem_path_entry_compare (const void *a, const void *b) {
+    const dbmem_path_entry *ea = (const dbmem_path_entry *)a;
+    const dbmem_path_entry *eb = (const dbmem_path_entry *)b;
+    return dbmem_path_tree_compare(&ea->path, &eb->path);
+}
+
+static int dbmem_paths_to_json (dbmem_string_list *paths, unsigned char *flags, char **result) {
     dbmem_json_buffer json = {0};
     int rc = SQLITE_OK;
     size_t prefix_len = dbmem_common_directory_prefix_len(paths);
@@ -2161,12 +2205,24 @@ static int dbmem_paths_to_json (dbmem_string_list *paths, char **result) {
     }
 
     if (paths->count > 1) {
-        qsort(paths->items, (size_t)paths->count, sizeof(char *), dbmem_path_tree_compare);
+        // sort paths and indexed flags together so flags keep matching their path by index
+        dbmem_path_entry *entries = (dbmem_path_entry *)dbmemory_alloc((uint64_t)paths->count * sizeof(dbmem_path_entry));
+        if (!entries) { rc = SQLITE_NOMEM; goto cleanup; }
+        for (int i = 0; i < paths->count; i++) {
+            entries[i].path = paths->items[i];
+            entries[i].indexed = flags ? flags[i] : 1;
+        }
+        qsort(entries, (size_t)paths->count, sizeof(dbmem_path_entry), dbmem_path_entry_compare);
+        for (int i = 0; i < paths->count; i++) {
+            paths->items[i] = entries[i].path;
+            if (flags) flags[i] = entries[i].indexed;
+        }
+        dbmemory_free(entries);
     }
 
     rc = dbmem_json_buffer_append(&json, "{\"root\":\"\",\"children\":");
     if (rc != SQLITE_OK) goto cleanup;
-    rc = dbmem_json_append_tree_children(&json, paths, 0, paths->count, 0);
+    rc = dbmem_json_append_tree_children(&json, paths, flags, 0, paths->count, 0);
     if (rc != SQLITE_OK) goto cleanup;
     rc = dbmem_json_buffer_append_char(&json, '}');
     if (rc != SQLITE_OK) goto cleanup;
@@ -2185,9 +2241,12 @@ static void dbmem_list_files (sqlite3_context *context, int argc, sqlite3_value 
     sqlite3 *db = sqlite3_context_db_handle(context);
     sqlite3_stmt *vm = NULL;
     dbmem_string_list paths = {0};
+    unsigned char *flags = NULL;
+    int flags_capacity = 0;
     char *json = NULL;
     int rc = sqlite3_prepare_v2(db,
-        "SELECT path FROM dbmem_content WHERE path IS NOT NULL AND path != '';",
+        "SELECT path, (length = 0 OR EXISTS (SELECT 1 FROM dbmem_vault v WHERE v.hash = dbmem_content.hash)) "
+        "FROM dbmem_content WHERE path IS NOT NULL AND path != '';",
         -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
@@ -2196,15 +2255,25 @@ static void dbmem_list_files (sqlite3_context *context, int argc, sqlite3_value 
         char *copy = dbmem_strdup(path);
         rc = dbmem_string_list_add(&paths, copy);
         if (rc != SQLITE_OK) goto cleanup;
+
+        if (paths.count > flags_capacity) {
+            int new_capacity = flags_capacity ? flags_capacity * 2 : 8;
+            unsigned char *new_flags = (unsigned char *)dbmemory_realloc(flags, (uint64_t)new_capacity);
+            if (!new_flags) { rc = SQLITE_NOMEM; goto cleanup; }
+            flags = new_flags;
+            flags_capacity = new_capacity;
+        }
+        flags[paths.count - 1] = (unsigned char)(sqlite3_column_int(vm, 1) != 0);
     }
     if (rc == SQLITE_DONE) rc = SQLITE_OK;
     if (rc != SQLITE_OK) goto cleanup;
 
-    rc = dbmem_paths_to_json(&paths, &json);
+    rc = dbmem_paths_to_json(&paths, flags, &json);
 
 cleanup:
     if (vm) sqlite3_finalize(vm);
     dbmem_string_list_free(&paths);
+    if (flags) dbmemory_free(flags);
 
     if (rc == SQLITE_OK) {
         sqlite3_result_text(context, json ? json : "{\"root\":\"\",\"children\":[]}", -1, json ? dbmemory_free : SQLITE_TRANSIENT);
@@ -2643,7 +2712,8 @@ static void dbmem_get_option (sqlite3_context *context, int argc, sqlite3_value 
 
     rc = sqlite3_step(vm);
     if (rc == SQLITE_DONE) {
-        if (strcasecmp(key, DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS) == 0) {
+        if (strcasecmp(key, DBMEM_SETTINGS_KEY_PRESERVE_DUP_PATHS) == 0 ||
+            strcasecmp(key, DBMEM_SETTINGS_KEY_DEFER_EMBEDDINGS) == 0) {
             sqlite3_result_int(context, 0);
         } else {
             sqlite3_result_null(context);
@@ -2860,6 +2930,7 @@ static int dbmem_process_callback (const char *text, size_t len, size_t offset, 
         dbmem_context_set_error(ctx, sqlite3_errmsg(ctx->db));
         goto cleanup;
     }
+    ctx->chunks_added++;
     DEBUG_EMBEDDING(&result);
 
     // save FTS5 (if available)
@@ -2875,6 +2946,11 @@ cleanup:
 }
 
 static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t len) {
+    if (ctx->defer_embeddings && !ctx->reindex_mode && !ctx->save_content) {
+        dbmem_context_set_error(ctx, "defer_embeddings requires save_content to be enabled");
+        return SQLITE_ERROR;
+    }
+
     uint64_t hash = dbmem_storage_hash_compute(buffer, (size_t)len, ctx->path, ctx->preserve_duplicate_paths);
     const char *saved_path = ctx->path;
     char *unique_path = NULL;
@@ -2931,10 +3007,18 @@ static int dbmem_process_buffer (dbmem_context *ctx, const char *buffer, int64_t
     }
 
     if (len == 0) goto cleanup;
+    if (ctx->defer_embeddings && !ctx->reindex_mode) goto cleanup;
 
+    ctx->chunks_added = 0;
     rc = dbmem_parse(buffer, (size_t)len, &settings);
 
-    if (rc == SQLITE_OK && !ctx->dimension_saved) {
+    if (rc == SQLITE_OK && ctx->chunks_added == 0) {
+        rc = dbmem_database_add_vault_sentinel(ctx);
+    }
+
+    // persist the dimension only after a real embedding established it:
+    // a zero-chunk parse would latch dimension=0 and block the real write
+    if (rc == SQLITE_OK && ctx->chunks_added > 0 && !ctx->dimension_saved) {
         // make sure to serialize dimension
         dbmem_settings_write_int(db, DBMEM_SETTINGS_KEY_DIMENSION, ctx->dimension);
         ctx->dimension_saved = true;
@@ -3938,6 +4022,146 @@ done:
     sqlite3_result_int64(context, processed);
 }
 
+// content is pending when it has a body to index but no vault rows (real chunks or sentinel) yet
+#define DBMEM_PENDING_PREDICATE \
+    "length > 0 AND value IS NOT NULL AND " \
+    "NOT EXISTS (SELECT 1 FROM dbmem_vault v WHERE v.hash = dbmem_content.hash)"
+
+static void dbmem_embed_pending (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    dbmem_context *ctx = (dbmem_context *)sqlite3_user_data(context);
+    sqlite3 *db = ctx->db;
+
+    sqlite3_int64 limit = -1;
+    if (argc == 1) {
+        if (sqlite3_value_type(argv[0]) != SQLITE_INTEGER || sqlite3_value_int64(argv[0]) <= 0) {
+            sqlite3_result_error(context, "The function memory_embed_pending expects a positive INTEGER limit", -1);
+            return;
+        }
+        limit = sqlite3_value_int64(argv[0]);
+    }
+
+    if (!ctx->model) {
+        sqlite3_result_error(context, "memory_embed_pending: no embedding model configured", -1);
+        return;
+    }
+
+    ctx->reindex_mode = true;
+    dbmem_context_reset_temp_values(ctx);
+
+    int64_t processed = 0;
+    int rc = SQLITE_OK;
+
+    while (limit < 0 || processed < limit) {
+        sqlite3_stmt *vm = NULL;
+        rc = sqlite3_prepare_v2(db,
+            "SELECT hash, path, value, context FROM dbmem_content "
+            "WHERE " DBMEM_PENDING_PREDICATE " LIMIT 1;",
+            -1, &vm, NULL);
+        if (rc != SQLITE_OK) break;
+
+        int step = sqlite3_step(vm);
+        if (step == SQLITE_DONE) {
+            sqlite3_finalize(vm);
+            break;
+        }
+        if (step != SQLITE_ROW) {
+            sqlite3_finalize(vm);
+            rc = step;
+            break;
+        }
+
+        // Copy row data before finalizing so we can write in the next step
+        const char *hash_raw = (const char *)sqlite3_column_text(vm, 0);
+        const char *path_raw = (const char *)sqlite3_column_text(vm, 1);
+        const char *value_raw = (const char *)sqlite3_column_text(vm, 2);
+        int64_t value_len = (int64_t)sqlite3_column_bytes(vm, 2);
+        const char *ctx_raw = (const char *)sqlite3_column_text(vm, 3);
+
+        char *hash_text = dbmem_strdup(hash_raw);
+        char *path = dbmem_strdup(path_raw);
+        char *value = (char *)sqlite3_malloc64((sqlite3_uint64)(value_len + 1));
+        if (value) { memcpy(value, value_raw, (size_t)value_len); value[value_len] = '\0'; }
+        char *ctx_name = dbmem_strdup(ctx_raw);
+
+        sqlite3_finalize(vm);
+
+        if (!hash_text || !path || !value) {
+            dbmemory_free(hash_text);
+            dbmemory_free(path);
+            if (value) sqlite3_free(value);
+            dbmemory_free(ctx_name);
+            rc = SQLITE_NOMEM;
+            break;
+        }
+
+        uint64_t stored_hash = 0;
+        if (!dbmem_hash_from_hex(hash_text, &stored_hash)) {
+            dbmemory_free(hash_text);
+            dbmemory_free(path);
+            sqlite3_free(value);
+            dbmemory_free(ctx_name);
+            rc = SQLITE_MISMATCH;
+            break;
+        }
+
+        // process_buffer recomputes the hash from value/path; when the stored hash was computed
+        // with a different preserve_duplicate_paths scope, rekey the row to keep the new vault
+        // rows attached to it (same approach as memory_reindex)
+        uint64_t target_hash = dbmem_storage_hash_compute(value, (size_t)value_len, path, ctx->preserve_duplicate_paths);
+        bool target_has_vault = dbmem_database_hash_has_vault(db, target_hash);
+
+        if (!target_has_vault) {
+            ctx->path = path;
+            ctx->context = ctx_name;
+            rc = dbmem_process_buffer(ctx, value, value_len);
+        }
+
+        if (rc == SQLITE_OK && target_hash != stored_hash) {
+            rc = dbmem_database_update_content_hash(db, path, target_hash);
+        }
+
+        ctx->path = NULL;
+        ctx->context = NULL;
+        dbmemory_free(hash_text);
+        dbmemory_free(path);
+        sqlite3_free(value);
+        dbmemory_free(ctx_name);
+
+        if (rc != SQLITE_OK) break;
+        processed++;
+    }
+
+    ctx->reindex_mode = false;
+    ctx->path = NULL;
+    ctx->context = NULL;
+
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error(context, ctx->error_msg[0] ? ctx->error_msg : sqlite3_errmsg(db), -1);
+        return;
+    }
+
+    sqlite3_result_int64(context, processed);
+}
+
+static void dbmem_pending_count (sqlite3_context *context, int argc, sqlite3_value **argv) {
+    UNUSED_PARAM(argc); UNUSED_PARAM(argv);
+    static const char *sql = "SELECT COUNT(*) FROM dbmem_content WHERE " DBMEM_PENDING_PREDICATE ";";
+
+    sqlite3 *db = sqlite3_context_db_handle(context);
+    sqlite3_stmt *vm = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(vm);
+        if (rc == SQLITE_ROW) {
+            sqlite3_result_int64(context, sqlite3_column_int64(vm, 0));
+            rc = SQLITE_OK;
+        }
+    }
+
+    if (vm) sqlite3_finalize(vm);
+    if (rc != SQLITE_OK) sqlite3_result_error(context, sqlite3_errmsg(db), -1);
+}
+
 // MARK: - Sync
 
 static void dbmem_enable_sync (sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -4161,6 +4385,15 @@ SQLITE_DBMEMORY_API int sqlite3_memory_init (sqlite3 *db, char **pzErrMsg, const
     if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_reindex", 0, SQLITE_UTF8, ctx, dbmem_sql_reindex, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    rc = sqlite3_create_function_v2(db, "memory_embed_pending", 0, SQLITE_UTF8, ctx, dbmem_embed_pending, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    rc = sqlite3_create_function_v2(db, "memory_embed_pending", 1, SQLITE_UTF8, ctx, dbmem_embed_pending, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
+
+    rc = sqlite3_create_function_v2(db, "memory_pending_count", 0, SQLITE_UTF8, ctx, dbmem_pending_count, NULL, NULL, NULL);
     if (rc != SQLITE_OK) { dbmem_context_free(ctx); return rc; }
 
     rc = sqlite3_create_function_v2(db, "memory_enable_sync", -1, SQLITE_UTF8, ctx, dbmem_enable_sync, NULL, NULL, NULL);
