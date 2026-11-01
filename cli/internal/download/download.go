@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,7 +42,7 @@ func (c Client) Install(ctx context.Context, owner, repo, version, baseDir strin
 		version = "latest"
 	}
 	if c.HTTP == nil {
-		c.HTTP = http.DefaultClient
+		c.HTTP = &http.Client{CheckRedirect: httpsOnlyRedirect}
 	}
 	if c.Platform.OS == "" {
 		c.Platform = CurrentPlatform()
@@ -84,11 +85,11 @@ func (c Client) Install(ctx context.Context, owner, repo, version, baseDir strin
 }
 
 func (c Client) release(ctx context.Context, owner, repo, version string) (release, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
 	if version != "latest" {
-		url = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, version)
+		endpoint = fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", owner, repo, version)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return release{}, err
 	}
@@ -112,12 +113,44 @@ func (c Client) release(ctx context.Context, owner, repo, version string) (relea
 	return rel, nil
 }
 
-func (c Client) download(ctx context.Context, url, path string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// The asset URL comes out of the GitHub API response, and whatever it points at
+// is loaded into the process as a native SQLite extension, so it must not be
+// fetched over plaintext.
+func httpsOnlyRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect to non-https URL %s", req.URL.Redacted())
+	}
+	return nil
+}
+
+// GITHUB_TOKEN must only be offered to GitHub itself: the download URL is taken
+// from an API response, so sending the user's token wherever it points would hand
+// the credential to a third party.
+func isGitHubHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "github.com" || host == "api.github.com" {
+		return true
+	}
+	return strings.HasSuffix(host, ".github.com") || strings.HasSuffix(host, ".githubusercontent.com")
+}
+
+func (c Client) download(ctx context.Context, rawURL, path string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid download URL: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("refusing to download over %q: only https is allowed", parsed.Scheme)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" && isGitHubHost(parsed.Hostname()) {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	res, err := c.HTTP.Do(req)

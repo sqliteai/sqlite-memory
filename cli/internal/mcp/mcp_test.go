@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -94,4 +96,81 @@ func TestServeStdioUsesContentLengthFraming(t *testing.T) {
 
 func bufioReader(r io.Reader) *bufio.Reader {
 	return bufio.NewReader(r)
+}
+
+func TestOriginAllowed(t *testing.T) {
+	cases := []struct {
+		origin string
+		want   bool
+	}{
+		{"", true}, // real MCP clients and curl send no Origin
+		{"http://127.0.0.1:8765", true},
+		{"http://localhost:8765", true},
+		{"http://[::1]:8765", true},
+		{"https://localhost", true},
+		{"http://evil.example", false},  // a page the user happens to visit
+		{"https://evil.example", false}, // ...over TLS
+		{"http://127.0.0.1.evil.test", false},
+		{"http://localhost.evil.test", false},
+		{"null", false}, // sandboxed iframe / some redirects
+		{"://", false},  // unparseable
+		// userinfo must not be mistaken for the host
+		{"http://localhost@evil.example", false},
+		{"http://127.0.0.1@evil.example/x", false},
+		// a host that merely contains a loopback name
+		{"http://myLocalhost", false},
+		{"http://localhost.", false},
+		{"http://127.0.0.2", false},
+		// non-http schemes still carry a host that must match
+		{"file://localhost", true},
+		{"https://evil.example:80", false},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader("{}"))
+		if c.origin != "" {
+			r.Header.Set("Origin", c.origin)
+		}
+		if got := originAllowed(r); got != c.want {
+			t.Errorf("originAllowed(Origin: %q) = %v, want %v", c.origin, got, c.want)
+		}
+	}
+}
+
+func TestHTTPHandlerRejectsForeignOrigin(t *testing.T) {
+	srv := httptest.NewServer(Server{}.httpHandler())
+	defer srv.Close()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+
+	// a browser on an attacker's page: must be refused before any tool runs
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://evil.example")
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin request: status = %d, want %d", res.StatusCode, http.StatusForbidden)
+	}
+
+	// a non-browser client (no Origin) must still work
+	res2, err := srv.Client().Post(srv.URL+"/mcp", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("no-Origin request: status = %d, want %d", res2.StatusCode, http.StatusOK)
+	}
+	var parsed response
+	if err := json.NewDecoder(res2.Body).Decode(&parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Result == nil {
+		t.Fatal("expected a tools/list result for a request without Origin")
+	}
 }

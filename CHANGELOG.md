@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.3.6] - 2026-11-01
+
+### Fixed
+
+- **`ORDER BY ranking ASC` on `memory_search` returned rows in descending order.** The virtual table always claimed to have satisfied the `ORDER BY`, so SQLite skipped its own sorter whatever direction was asked for. The claim is now made only for `ORDER BY ranking DESC`, which is the order the table actually produces; every other `ORDER BY` is left to SQLite.
+- **A repeated or multiple hidden-column constraint could silently return no rows.** `memory_search` identified `query`, `max_entries` and `context` by their position in the argument list rather than by the column they came from, so a query such as `WHERE query = ? AND context = ? AND context = ?` could read the wrong value or none at all. Each claimed constraint now records which column it belongs to, and a duplicate is consumed instead of being left for SQLite to evaluate against a hidden column.
+- **`memory_rename_file()` left the source-path record behind**, so a renamed file kept pointing at its old location and `memory_reindex()` could re-read the wrong path. The `dbmem_content_source` row is now updated with the resolved path, and the new storage path is normalized the same way as on insert.
+- **`memory_reindex()` no longer re-reads a file named only by `dbmem_content.path`.** Only `dbmem_content_source.source_path`, which is written locally when content is ingested from disk, drives a re-read, so a `path` value that arrived from somewhere else cannot make the extension open a local file.
+- **One-byte buffer over-allocation** in the disambiguated-path helper.
+- **Possible use of an uninitialized counter** on an early error exit from `memory_materialize_files()`.
+- **A truncated or malformed embedding response could be read past its end.** The remote provider's JSON is walked with explicit token bounds and a nesting limit, the result of the token-filling pass is checked, and a declared `output_dimension` larger than the array actually returned is now reported as an error instead of trusted. A dimension smaller than the array keeps working, as some providers return a prefix.
+- **`llama_backend_free()` is no longer called when a local engine is released.** The llama.cpp backend is process-global and not reference-counted, so freeing it while another engine was still alive could leave that engine using torn-down global state.
+- The extension API macro was missing from two translation units, so an `OMIT_CURL=1` loadable-extension build did not compile.
+
+### Security
+
+- **`memory_materialize_files()` refuses absolute paths**, not only paths containing `..`. A stored path such as `/etc/passwd` or `C:/evil.txt` was previously resolved as given, so content written by another writer — a sync peer, or any process with access to the database — could be materialized outside the destination directory. An exhaustive sweep of the path resolver finds no input that escapes the root.
+- **Materialization no longer follows symbolic links.** Directory components below the caller-supplied root are checked with `lstat`, files are created with `O_NOFOLLOW`, and a path that is already a symlink is refused before its target is read, so neither the content of a file outside the root nor its existence can be inferred from the outcome. Components of the root itself are still resolved normally, so a root that legitimately lives under a symlink keeps working.
+- **The MCP HTTP transport validates the `Origin` header.** A request carrying an origin that is not `localhost`, `127.0.0.1` or `::1` is rejected with 403, which closes the DNS-rebinding and cross-site path that let any web page a user visited drive the local server's tools. Requests with no `Origin` are still accepted, because MCP clients do not send one.
+- **The extension installer only sends `GITHUB_TOKEN` to GitHub.** The download URL comes out of an API response, so the token is now attached only when the host is GitHub itself, and a redirect away from `https` is refused rather than followed.
+
 ## [1.3.5] - 2026-06-10
 
 ### Added
