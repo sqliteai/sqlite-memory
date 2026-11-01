@@ -10,6 +10,10 @@
 #include "sqlite-memory.h"
 #include <string.h>
 
+#ifndef SQLITE_CORE
+SQLITE_EXTENSION_INIT3
+#endif
+
 int dbmem_http_post(const char *url, const char *api_key, const char *body,
                     void **out_data, size_t *out_size, long *out_http_code,
                     char *err_msg, size_t err_msg_size) {

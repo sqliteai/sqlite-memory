@@ -18,6 +18,7 @@
 #endif
 #ifndef _WIN32
 #include <unistd.h>
+#include <fcntl.h>
 #endif
 #include <stdint.h>
 #include <stdbool.h>
@@ -156,6 +157,7 @@ static int dbmem_database_commit_transaction (sqlite3 *db);
 static int dbmem_database_rollback_transaction (sqlite3 *db);
 static int dbmem_json_append_tree_children (dbmem_json_buffer *json, dbmem_string_list *paths, const unsigned char *flags, int start, int end, size_t offset);
 static char *dbmem_path_normalized_copy (const char *path);
+static char *dbmem_path_storage_copy (const char *path, const char *root);
 static char *dbmem_path_unique_storage_copy (sqlite3 *db, const char *preferred_path, const char *source_path);
 static char *dbmem_path_directory_marker_storage_copy (const char *path);
 static char *dbmem_path_directory_file_storage_copy (const char *path);
@@ -1462,6 +1464,13 @@ static int dbmem_resolve_content_hash_for_path (sqlite3 *db, const char *path, u
     char *marker_path = dbmem_path_directory_marker_storage_copy(path);
     if (!marker_path) return SQLITE_NOMEM;
 
+    // source_path is stored normalized, so the lookup must be normalized too
+    char *normalized_path = dbmem_path_normalized_copy(path);
+    if (!normalized_path) {
+        dbmemory_free(marker_path);
+        return SQLITE_NOMEM;
+    }
+
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
@@ -1469,7 +1478,7 @@ static int dbmem_resolve_content_hash_for_path (sqlite3 *db, const char *path, u
     if (rc != SQLITE_OK) goto cleanup;
     rc = sqlite3_bind_text(vm, 2, marker_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
-    rc = sqlite3_bind_text(vm, 3, path, -1, SQLITE_STATIC);
+    rc = sqlite3_bind_text(vm, 3, normalized_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto cleanup;
 
     while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
@@ -1483,6 +1492,7 @@ static int dbmem_resolve_content_hash_for_path (sqlite3 *db, const char *path, u
 
 cleanup:
     sqlite3_finalize(vm);
+    dbmemory_free(normalized_path);
     dbmemory_free(marker_path);
     return rc;
 }
@@ -1654,9 +1664,12 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
         return;
     }
 
+    // both arms must normalize: every other ingress (memory_add_content,
+    // memory_add_file, memory_add_directory) stores dbmem_path_storage_copy(),
+    // and storing a raw absolute path here would later be materialized verbatim
     new_storage_path = old_is_directory_marker
         ? dbmem_path_directory_marker_storage_copy(new_path)
-        : dbmem_strdup(new_path);
+        : dbmem_path_storage_copy(new_path, NULL);
     if (!new_storage_path) {
         dbmemory_free(resolved_path);
         sqlite3_result_error_nomem(context);
@@ -1761,9 +1774,11 @@ static void dbmem_rename_file (sqlite3_context *context, int argc, sqlite3_value
     sqlite3_finalize(vm);
     vm = NULL;
 
-    rc = sqlite3_prepare_v2(db, "UPDATE dbmem_content_source SET path = ?2 WHERE path = ?1 OR source_path = ?1;", -1, &vm, NULL);
+    // resolved_path is the path the content row carried before the rename above;
+    // old_path is only what the caller passed in and may differ from it
+    rc = sqlite3_prepare_v2(db, "UPDATE dbmem_content_source SET path = ?2 WHERE path = ?1;", -1, &vm, NULL);
     if (rc != SQLITE_OK) goto rollback;
-    rc = sqlite3_bind_text(vm, 1, old_path, -1, SQLITE_STATIC);
+    rc = sqlite3_bind_text(vm, 1, resolved_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto rollback;
     rc = sqlite3_bind_text(vm, 2, new_storage_path, -1, SQLITE_STATIC);
     if (rc != SQLITE_OK) goto rollback;
@@ -1827,6 +1842,11 @@ static bool dbmem_path_char_equal (char a, char b) {
 static bool dbmem_path_is_absolute (const char *path) {
     if (!path || !path[0]) return false;
     if (dbmem_path_separator(path[0])) return true;
+    // A "X:" drive prefix counts as a root on every platform on purpose: a database
+    // replicated from a Windows peer carries Windows paths, and memory_list_files()
+    // has to recognise them wherever it runs. The root-escape this used to allow
+    // (dbmem_path_join_root() drops the root for anything absolute) is blocked in
+    // dbmem_materialize_path_copy() instead.
     return (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
             path[1] == ':' && dbmem_path_separator(path[2]));
 }
@@ -3217,7 +3237,7 @@ static char *dbmem_path_disambiguated_copy (const char *source_path, int compone
     dbmem_hash_to_hex(hash, hash_text);
 
     size_t base_len = strlen(base);
-    size_t total = 9 + 1 + base_len;
+    size_t total = 8 + 1 + base_len;
     char *copy = (char *)dbmemory_alloc((uint64_t)total + 1);
     if (!copy) return NULL;
     memcpy(copy, hash_text, 8);
@@ -3353,10 +3373,14 @@ static int dbmem_reindex (dbmem_context *ctx) {
         dbmem_context_reset_temp_values(ctx);
         ctx->context = context;
 
+        // Only source_path is trustworthy provenance for re-reading from disk: it
+        // is recorded by this extension in dbmem_content_source, which sqlite-sync
+        // does not replicate. dbmem_content.path IS replicated, so treating it as
+        // a filesystem path let a peer name any local file and have its contents
+        // read into the database (and replicated back). Rows without provenance
+        // are re-embedded from the stored value instead.
         if (source_path && dbmem_file_exists(source_path)) {
             rc = dbmem_process_file(ctx, source_path);
-        } else if (path && dbmem_file_exists(path)) {
-            rc = dbmem_process_file(ctx, path);
         } else if (value && value_len > 0) {
             ctx->path = path;
             ctx->source_path = source_path;
@@ -3541,8 +3565,28 @@ static void dbmem_add_file (sqlite3_context *context, int argc, sqlite3_value **
     (rc == 0) ? sqlite3_result_int(context, 1) : sqlite3_result_error(context, ctx->error_msg, -1);
 }
 
-static int dbmem_make_directory (const char *path) {
-    if (dbmem_dir_exists(path)) return SQLITE_OK;
+// Like dbmem_dir_exists() but does not follow a final symlink. Materialization
+// must refuse to traverse a symlinked directory it did not create, otherwise a
+// stored path such as "linkdir/sub/file.md" writes wherever linkdir points.
+static bool dbmem_dir_exists_nofollow (const char *path) {
+    if (!path) return false;
+
+    #ifdef _WIN32
+    // reparse points are not distinguished here; GetFileAttributesA would be
+    // needed and windows.h is not included in this translation unit
+    return dbmem_dir_exists(path);
+    #else
+    struct stat st;
+    if (lstat(path, &st) != 0) return false;
+    return S_ISDIR(st.st_mode);
+    #endif
+}
+
+// nofollow refuses a symlinked directory. It is applied only to the components
+// that come from the stored (untrusted) path: the materialization root is chosen
+// by the caller and may legitimately sit under a symlink — /tmp is one on macOS.
+static int dbmem_make_directory (const char *path, bool nofollow) {
+    if (nofollow ? dbmem_dir_exists_nofollow(path) : dbmem_dir_exists(path)) return SQLITE_OK;
 
     #ifdef _WIN32
     int rc = _mkdir(path);
@@ -3550,7 +3594,8 @@ static int dbmem_make_directory (const char *path) {
     int rc = mkdir(path, 0755);
     #endif
 
-    if (rc == 0 || (errno == EEXIST && dbmem_dir_exists(path))) return SQLITE_OK;
+    if (rc == 0) return SQLITE_OK;
+    if (errno == EEXIST && (nofollow ? dbmem_dir_exists_nofollow(path) : dbmem_dir_exists(path))) return SQLITE_OK;
     return SQLITE_IOERR;
 }
 
@@ -3573,7 +3618,10 @@ static size_t dbmem_path_root_len (const char *path) {
     return dbmem_path_separator(path[0]) ? 1 : 0;
 }
 
-static int dbmem_ensure_directory (const char *path) {
+// trusted_len is the length of the leading part of path that the caller supplied
+// (the materialization root); components past it come from dbmem_content.path and
+// must not be traversed through a symlink.
+static int dbmem_ensure_directory (const char *path, size_t trusted_len) {
     if (!path || !path[0]) return SQLITE_OK;
 
     char *copy = dbmem_strdup(path);
@@ -3591,19 +3639,19 @@ static int dbmem_ensure_directory (const char *path) {
 
         char saved = copy[i];
         copy[i] = '\0';
-        rc = dbmem_make_directory(copy);
+        rc = dbmem_make_directory(copy, i > trusted_len);
         copy[i] = saved;
         if (rc != SQLITE_OK) goto cleanup;
     }
 
-    rc = dbmem_make_directory(copy);
+    rc = dbmem_make_directory(copy, len > trusted_len);
 
 cleanup:
     dbmemory_free(copy);
     return rc;
 }
 
-static int dbmem_ensure_parent_directory (const char *path) {
+static int dbmem_ensure_parent_directory (const char *path, size_t trusted_len) {
     if (!path || !path[0]) return SQLITE_ERROR;
 
     size_t len = strlen(path);
@@ -3622,12 +3670,22 @@ static int dbmem_ensure_parent_directory (const char *path) {
     memcpy(parent, path, parent_len);
     parent[parent_len] = '\0';
 
-    int rc = dbmem_ensure_directory(parent);
+    int rc = dbmem_ensure_directory(parent, trusted_len);
     dbmemory_free(parent);
     return rc;
 }
 
-static int dbmem_write_file_bytes (const char *path, const char *content, int len) {
+static int dbmem_write_file_bytes (const char *path, const char *content, int len, size_t trusted_len) {
+    #ifndef _WIN32
+    // Refuse a symlink here, before anything reads it. dbmem_file_read() below
+    // follows symlinks, so comparing content first would answer "does the file
+    // this link points at contain exactly these bytes?" — success when it does,
+    // an error from the guarded open when it does not. Failing uniformly keeps
+    // the O_NOFOLLOW guard from leaking what it refuses to overwrite.
+    struct stat link_st;
+    if (lstat(path, &link_st) == 0 && S_ISLNK(link_st.st_mode)) return SQLITE_IOERR;
+    #endif
+
     int64_t existing_len = 0;
     char *existing = dbmem_file_read(path, &existing_len);
     if (existing) {
@@ -3636,11 +3694,23 @@ static int dbmem_write_file_bytes (const char *path, const char *content, int le
         if (same) return SQLITE_OK;
     }
 
-    int rc = dbmem_ensure_parent_directory(path);
+    int rc = dbmem_ensure_parent_directory(path, trusted_len);
     if (rc != SQLITE_OK) return rc;
 
+    #ifdef _WIN32
     FILE *file = fopen(path, "wb");
     if (!file) return SQLITE_IOERR;
+    #else
+    // O_NOFOLLOW: a symlink at this path must not have its target truncated
+    // 0666 is what fopen(path, "wb") would have requested; the umask applies as before
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0666);
+    if (fd < 0) return SQLITE_IOERR;
+    FILE *file = fdopen(fd, "wb");
+    if (!file) {
+        close(fd);
+        return SQLITE_IOERR;
+    }
+    #endif
 
     size_t written = fwrite(content, 1, (size_t)len, file);
     if (written != (size_t)len) rc = SQLITE_IOERR_WRITE;
@@ -3697,7 +3767,10 @@ static char *dbmem_materialize_path_copy (const char *root, const char *path, in
             *rc = SQLITE_NOMEM;
             return NULL;
         }
-        if (dbmem_path_has_parent_segment(logical_path)) {
+        // dbmem_path_join_root() drops the root for anything that looks absolute,
+        // and dbmem_path_is_absolute() accepts a "X:" drive prefix on every
+        // platform, so a last component of "C:" would escape the root
+        if (dbmem_path_has_parent_segment(logical_path) || dbmem_path_is_absolute(logical_path)) {
             dbmemory_free(logical_path);
             *rc = SQLITE_MISUSE;
             return NULL;
@@ -3709,7 +3782,11 @@ static char *dbmem_materialize_path_copy (const char *root, const char *path, in
         return write_path;
     }
 
-    if (dbmem_path_has_parent_segment(path)) {
+    // With no root the path is used verbatim, so an absolute one would be written
+    // wherever it points. dbmem_content.path is not trustworthy on its own: it is
+    // replicated by sqlite-sync and writable by the host, so reject it here the
+    // same way ".." segments are rejected.
+    if (dbmem_path_has_parent_segment(path) || dbmem_path_is_absolute(path)) {
         *rc = SQLITE_MISUSE;
         return NULL;
     }
@@ -3729,10 +3806,14 @@ static void dbmem_materialize_files (sqlite3_context *context, int argc, sqlite3
     static const char *sql =
         "SELECT path, value FROM dbmem_content WHERE path IS NOT NULL AND path != '' ORDER BY path;";
 
+    sqlite3_int64 count = 0;
+    // dbmem_path_join_root() lays the write path out as <trimmed root> + '/' + logical,
+    // so this is exactly the prefix the caller chose; everything after it comes from
+    // dbmem_content.path and is treated as untrusted when creating directories.
+    size_t trusted_len = (root && root[0]) ? dbmem_path_trimmed_len(root) : 0;
     int rc = sqlite3_prepare_v2(db, sql, -1, &vm, NULL);
     if (rc != SQLITE_OK) goto cleanup;
 
-    sqlite3_int64 count = 0;
     while ((rc = sqlite3_step(vm)) == SQLITE_ROW) {
         const char *path = (const char *)sqlite3_column_text(vm, 0);
         const char *content = (const char *)sqlite3_column_text(vm, 1);
@@ -3751,15 +3832,15 @@ static void dbmem_materialize_files (sqlite3_context *context, int argc, sqlite3
             if (path_rc == SQLITE_NOMEM) {
                 sqlite3_result_error_nomem(context);
             } else {
-                sqlite3_result_error(context, "memory_materialize_files refuses paths containing '..' segments", -1);
+                sqlite3_result_error(context, "memory_materialize_files refuses absolute paths and paths containing '..' segments", -1);
             }
             sqlite3_finalize(vm);
             return;
         }
 
         rc = is_directory_marker
-            ? dbmem_ensure_directory(write_path)
-            : dbmem_write_file_bytes(write_path, content, len);
+            ? dbmem_ensure_directory(write_path, trusted_len)
+            : dbmem_write_file_bytes(write_path, content, len, trusted_len);
         dbmemory_free(write_path);
         if (rc != SQLITE_OK) {
             sqlite3_result_error(context, is_directory_marker ? "memory_materialize_files failed to create a directory" : "memory_materialize_files failed to write a file", -1);

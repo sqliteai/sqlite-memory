@@ -402,7 +402,11 @@ void dbmem_local_engine_free (dbmem_local_engine_t *engine) {
         llama_model_free(engine->model);
         engine->model = NULL;
     }
-    
-    llama_backend_free();
+
+    // llama_backend_init()/llama_backend_free() act on process-global state and are
+    // not reference counted, so freeing here would tear down state still in use by
+    // another engine (memory_set_model builds the new engine before releasing the
+    // old one, and every connection has its own engine). The global tables are
+    // reclaimed at process exit.
     dbmemory_free(engine);
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -74,10 +75,42 @@ func (s Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) err
 	}
 }
 
-func (s Server) ServeHTTP(ctx context.Context, addr string) error {
+// originAllowed guards the HTTP transport against browser-driven requests.
+//
+// A loopback listener is reachable from any page the user happens to visit, and
+// an attacker-controlled hostname can be rebound to 127.0.0.1, so the MCP spec
+// requires HTTP transports to validate Origin. Without it a visited page could
+// drive the tools below — memory_add_directory followed by memory_search reads
+// the user's files back out, and memory_clear destroys the index.
+//
+// A request with no Origin header is allowed: real MCP clients and curl do not
+// send one, while a browser always does for a cross-origin request.
+func originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	switch parsed.Hostname() {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
+}
+
+// httpHandler builds the transport's routes. Split out of ServeHTTP so the
+// Origin check can be exercised by a test without binding a port.
+func (s Server) httpHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
+		if !originAllowed(r) {
+			http.Error(w, "forbidden: cross-origin requests are not allowed", http.StatusForbidden)
+			return
+		}
 		var req request
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, response{JSONRPC: "2.0", Error: errObj(-32700, err.Error())})
@@ -90,7 +123,11 @@ func (s Server) ServeHTTP(ctx context.Context, addr string) error {
 		}
 		writeJSON(w, res)
 	})
-	server := &http.Server{Addr: addr, Handler: mux}
+	return mux
+}
+
+func (s Server) ServeHTTP(ctx context.Context, addr string) error {
+	server := &http.Server{Addr: addr, Handler: s.httpHandler()}
 	go func() {
 		<-ctx.Done()
 		_ = server.Shutdown(context.Background())

@@ -16,6 +16,10 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifndef SQLITE_CORE
+SQLITE_EXTENSION_INIT3
+#endif
+
 #if defined(__ANDROID__) && !defined(DBMEM_OMIT_CURL)
 #include "cacert.h"
 static size_t cacert_len = sizeof(cacert_pem) - 1;
@@ -210,12 +214,24 @@ static int set_json_error_message (dbmem_remote_engine_t *engine) {
     return -1;
 }
 
-static int dbmem_json_skip_token (const jsmntok_t *tokens, int index) {
+// jsmn runs in permissive mode, so a malformed response is still accepted with a
+// positive token count and an object size that counts every direct child instead
+// of key/value pairs. Walking such a stream runs the index past the token array,
+// so every index is bounded against ntokens and the recursion is depth-capped.
+// Returning ntokens means "ran out of tokens" and is treated as a failure by the
+// callers below.
+#define DBMEM_JSON_MAX_DEPTH    32
+
+static int dbmem_json_skip_token (const jsmntok_t *tokens, int ntokens, int index, int depth) {
+    if (index < 0 || index >= ntokens) return ntokens;
+    if (depth >= DBMEM_JSON_MAX_DEPTH) return ntokens;
+
     int next = index + 1;
 
     if (tokens[index].type == JSMN_ARRAY) {
         for (int i = 0; i < tokens[index].size; i++) {
-            next = dbmem_json_skip_token(tokens, next);
+            next = dbmem_json_skip_token(tokens, ntokens, next, depth + 1);
+            if (next >= ntokens) return ntokens;
         }
         return next;
     }
@@ -223,7 +239,9 @@ static int dbmem_json_skip_token (const jsmntok_t *tokens, int index) {
     if (tokens[index].type == JSMN_OBJECT) {
         for (int i = 0; i < tokens[index].size; i++) {
             next += 1; // skip key token
-            next = dbmem_json_skip_token(tokens, next);
+            if (next >= ntokens) return ntokens;
+            next = dbmem_json_skip_token(tokens, ntokens, next, depth + 1);
+            if (next >= ntokens) return ntokens;
         }
         return next;
     }
@@ -237,18 +255,23 @@ static bool dbmem_json_token_equals (const char *json, const jsmntok_t *token, c
     return token_len == len && memcmp(json + token->start, text, len) == 0;
 }
 
-static int dbmem_json_object_find (const char *json, const jsmntok_t *tokens, int object_index, const char *key) {
-    if (object_index < 0 || tokens[object_index].type != JSMN_OBJECT) return -1;
+// returns the index of the value token for key, or -1 when absent or when the
+// token stream is inconsistent (never an index outside [0, ntokens))
+static int dbmem_json_object_find (const char *json, const jsmntok_t *tokens, int ntokens, int object_index, const char *key) {
+    if (object_index < 0 || object_index >= ntokens) return -1;
+    if (tokens[object_index].type != JSMN_OBJECT) return -1;
 
     int index = object_index + 1;
     for (int i = 0; i < tokens[object_index].size; i++) {
         int key_index = index;
         int value_index = key_index + 1;
 
+        if (key_index >= ntokens || value_index >= ntokens) return -1;
         if (tokens[key_index].type != JSMN_STRING) return -1;
         if (dbmem_json_token_equals(json, &tokens[key_index], key)) return value_index;
 
-        index = dbmem_json_skip_token(tokens, value_index);
+        index = dbmem_json_skip_token(tokens, ntokens, value_index, 0);
+        if (index >= ntokens) return -1;
     }
 
     return -1;
@@ -535,7 +558,16 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     }
 
     jsmn_init(&parser);
-    jsmn_parse(&parser, engine->data, engine->data_size, engine->tokens, ntokens);
+    // the counting pass runs with tokens == NULL, a mode in which jsmn skips its
+    // unmatched-token check, so it can report a positive count for input the
+    // filling pass rejects. Without this check the untouched slots would be read
+    // as valid tokens: raw memory on the first call, and tokens left over from an
+    // earlier response after that (the buffer is reused and only ever grows).
+    int filled = jsmn_parse(&parser, engine->data, engine->data_size, engine->tokens, ntokens);
+    if (filled != ntokens) {
+        dbmem_context_set_error(engine->context, "Failed to parse API response");
+        return -1;
+    }
     jsmntok_t *tokens = engine->tokens;
 
     // extract fields
@@ -550,24 +582,24 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
         return -1;
     }
 
-    int output_dimension_index = dbmem_json_object_find(engine->data, tokens, 0, "output_dimension");
+    int output_dimension_index = dbmem_json_object_find(engine->data, tokens, ntokens, 0, "output_dimension");
     if (output_dimension_index >= 0 && tokens[output_dimension_index].type == JSMN_PRIMITIVE) {
         n_embd = atoi(engine->data + tokens[output_dimension_index].start);
     }
 
-    int data_index = dbmem_json_object_find(engine->data, tokens, 0, "data");
+    int data_index = dbmem_json_object_find(engine->data, tokens, ntokens, 0, "data");
     if (data_index < 0 || tokens[data_index].type != JSMN_ARRAY || tokens[data_index].size <= 0) {
         dbmem_context_set_error(engine->context, "Missing embedding data in API response");
         return -1;
     }
 
     int item_index = data_index + 1;
-    if (tokens[item_index].type != JSMN_OBJECT) {
+    if (item_index >= ntokens || tokens[item_index].type != JSMN_OBJECT) {
         dbmem_context_set_error(engine->context, "Invalid embedding item in API response");
         return -1;
     }
 
-    int embedding_index = dbmem_json_object_find(engine->data, tokens, item_index, "embedding");
+    int embedding_index = dbmem_json_object_find(engine->data, tokens, ntokens, item_index, "embedding");
     if (embedding_index < 0 || tokens[embedding_index].type != JSMN_ARRAY) {
         dbmem_context_set_error(engine->context, "Missing embedding data in API response");
         return -1;
@@ -579,14 +611,14 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
     emb_count = (size_t)tokens[embedding_index].size;
     emb_start = embedding_index + 1;
 
-    int truncated_index = dbmem_json_object_find(engine->data, tokens, item_index, "truncated");
+    int truncated_index = dbmem_json_object_find(engine->data, tokens, ntokens, item_index, "truncated");
     if (truncated_index >= 0) {
         truncated = dbmem_json_parse_bool(engine->data, &tokens[truncated_index]);
     }
 
-    int usage_index = dbmem_json_object_find(engine->data, tokens, 0, "usage");
+    int usage_index = dbmem_json_object_find(engine->data, tokens, ntokens, 0, "usage");
     if (usage_index >= 0 && tokens[usage_index].type == JSMN_OBJECT) {
-        int request_tokens_index = dbmem_json_object_find(engine->data, tokens, usage_index, "request_tokens");
+        int request_tokens_index = dbmem_json_object_find(engine->data, tokens, ntokens, usage_index, "request_tokens");
         if (request_tokens_index >= 0 && tokens[request_tokens_index].type == JSMN_PRIMITIVE) {
             request_tokens = atoi(engine->data + tokens[request_tokens_index].start);
         }
@@ -602,6 +634,15 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
         return -1;
     }
 
+    // n_embd is what callers use to size the embedding blob, so a declared
+    // output_dimension longer than the array actually returned would read past
+    // the embedding buffer. A shorter one is legitimate (the leading n_embd
+    // values are used) and stays supported.
+    if (n_embd < 0 || (size_t)n_embd > emb_count) {
+        dbmem_context_set_error(engine->context, "Declared output_dimension exceeds the embedding array returned by the API");
+        return -1;
+    }
+
     // allocate/grow embedding buffer
     if (engine->embedding_capacity < emb_count) {
         if (engine->embedding) dbmemory_free(engine->embedding);
@@ -611,6 +652,12 @@ int dbmem_remote_compute_embedding (dbmem_remote_engine_t *engine, const char *t
             return -1;
         }
         engine->embedding_capacity = emb_count;
+    }
+
+    // the array token's children must all be present in the token stream
+    if (emb_count > (size_t)(ntokens - emb_start)) {
+        dbmem_context_set_error(engine->context, "Truncated embedding array in API response");
+        return -1;
     }
 
     // parse embedding floats
